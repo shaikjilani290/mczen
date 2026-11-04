@@ -1,0 +1,60 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Local voice: VAD",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-File",
+				"${workspaceFolder}\\backend-nestjs\\scripts\\local-voice\\start.ps1",
+				"-Service",
+				"vad"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Local voice: TTS",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-File",
+				"${workspaceFolder}\\backend-nestjs\\scripts\\local-voice\\start.ps1",
+				"-Service",
+				"tts"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Local voice: STT",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-File",
+				"${workspaceFolder}\\backend-nestjs\\scripts\\local-voice\\start.ps1",
+				"-Service",
+				"stt"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "McZEN backend: dev",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"--prefix",
+				"${workspaceFolder}\\backend-nestjs",
+				"run",
+				"start:dev"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

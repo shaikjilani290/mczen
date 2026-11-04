@@ -1,0 +1,14 @@
+export declare const AUTH_MODE: unique symbol;
+export declare const REQUIRED_PERMISSIONS: unique symbol;
+export declare const DEV_HEADER_ALLOWED: unique symbol;
+export declare const AUTH_RATE_POLICY: unique symbol;
+export type AuthMode = 'public' | 'identity' | 'tenant' | 'platform';
+export type AuthRatePolicy = 'register' | 'login' | 'refresh' | 'forgot' | 'reset' | 'verify';
+export declare const PublicRoute: () => import("@nestjs/common", { with: { "resolution-mode": "import" } }).CustomDecorator<typeof AUTH_MODE>;
+export declare const IdentityOnly: () => import("@nestjs/common", { with: { "resolution-mode": "import" } }).CustomDecorator<typeof AUTH_MODE>;
+export declare const RequirePermission: (...permissions: string[]) => import("@nestjs/common", { with: { "resolution-mode": "import" } }).CustomDecorator<typeof REQUIRED_PERMISSIONS>;
+export declare const RequirePlatform: (...permissions: string[]) => <TFunction extends Function, Y>(target: TFunction | object, propertyKey?: string | symbol, descriptor?: TypedPropertyDescriptor<Y>) => void;
+export declare const AllowDevHeader: () => import("@nestjs/common", { with: { "resolution-mode": "import" } }).CustomDecorator<typeof DEV_HEADER_ALLOWED>;
+export declare const AuthRateLimit: (policy: AuthRatePolicy) => import("@nestjs/common", { with: { "resolution-mode": "import" } }).CustomDecorator<typeof AUTH_RATE_POLICY>;
+export declare const CurrentUser: (...dataOrPipes: unknown[]) => ParameterDecorator;
+export declare const CurrentTenant: (...dataOrPipes: any[]) => ParameterDecorator;

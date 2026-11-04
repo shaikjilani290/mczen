@@ -1,0 +1,42 @@
+import { DataSource, EntityManager, ObjectLiteral } from 'typeorm';
+import { TenantScopedRepository } from '../common/tenant/tenant-scoped.repository';
+import type { Language, SecretKind } from './assistants.dto';
+type Row = Record<string, unknown>;
+export declare const DEFAULT_MAX_ASSISTANTS = 3;
+export type AuditAction = 'create' | 'update' | 'instructions' | 'secret_set' | 'secret_clear';
+export declare class AssistantRepository extends TenantScopedRepository<ObjectLiteral> {
+    private readonly source?;
+    constructor(source?: DataSource | undefined);
+    private get database();
+    transaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T>;
+    private tenantBinary;
+    private run;
+    assistantBinary(id: string): Buffer;
+    list(): Promise<Row[]>;
+    find(id: string, manager?: EntityManager, lock?: boolean): Promise<Row>;
+    voice(id: string, manager?: EntityManager): Promise<Row | undefined>;
+    languages(id: string, manager?: EntityManager): Promise<Row[]>;
+    activeInstructions(id: string, manager?: EntityManager): Promise<Row | undefined>;
+    instructionHistory(id: string): Promise<Row[]>;
+    configuredSecrets(id: string, manager?: EntityManager): Promise<SecretKind[]>;
+    audit(id: string): Promise<Row[]>;
+    maxAssistants(manager: EntityManager): Promise<number>;
+    countActive(manager: EntityManager): Promise<number>;
+    insertAssistant(manager: EntityManager, input: {
+        name: string;
+        description: string | null;
+        isDefault: boolean;
+        actorId?: string;
+    }): Promise<string>;
+    updateAssistantColumns(manager: EntityManager, id: string, columns: Record<string, unknown>): Promise<void>;
+    updateVoiceColumns(manager: EntityManager, id: string, columns: Record<string, unknown>, actorId?: string): Promise<void>;
+    bumpVersion(manager: EntityManager, id: string): Promise<void>;
+    replaceLanguages(manager: EntityManager, id: string, enabled: Language[], defaultLanguage: Language): Promise<void>;
+    insertInstructions(manager: EntityManager, id: string, systemPrompt: string, guardrailNotes: string | null, actorId?: string): Promise<number>;
+    upsertSecret(manager: EntityManager, id: string, kind: SecretKind, ciphertext: string, actorId?: string): Promise<void>;
+    deleteSecret(manager: EntityManager, id: string, kind: SecretKind): Promise<void>;
+    writeAudit(manager: EntityManager, id: string, action: AuditAction, configVersion: number, fields: string[], actorId?: string): Promise<void>;
+    tenantIdForAad(): string;
+    toId(binary: unknown): string;
+}
+export {};
