@@ -169,10 +169,14 @@ let ConfiguredSttAdapter = ConfiguredSttAdapter_1 = class ConfiguredSttAdapter {
                 event: 'voice_remote_stt_timing', requestId: request.requestId,
                 provider: 'remote', durationMs: performance.now() - started,
                 processingMs: payload.processing_time * 1000, audioMs: payload.audio_duration * 1000,
+                ...(typeof payload.model === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(payload.model) ? { activeModel: payload.model } : {}),
+                ...(typeof payload.inference_time === 'number' ? { inferenceMs: payload.inference_time * 1000 } : {}),
             });
             return {
                 text: payload.transcript, language: payload.language,
                 isFinal: !request.partial, processingMs: payload.processing_time * 1000,
+                ...(payload.languageProbability === undefined ? {} : { languageProbability: payload.languageProbability }),
+                ...(payload.recognitionQuality === undefined ? {} : { recognitionQuality: payload.recognitionQuality }),
             };
         });
     }
@@ -253,7 +257,13 @@ function isRemoteResult(value) {
         typeof payload.processing_time === 'number' && Number.isFinite(payload.processing_time) &&
         payload.processing_time >= 0 && Number.isFinite(payload.processing_time * 1000) &&
         typeof payload.audio_duration === 'number' && Number.isFinite(payload.audio_duration) &&
-        payload.audio_duration >= 0 && Number.isFinite(payload.audio_duration * 1000);
+        payload.audio_duration >= 0 && Number.isFinite(payload.audio_duration * 1000) &&
+        (payload.languageProbability === undefined || (typeof payload.languageProbability === 'number' &&
+            Number.isFinite(payload.languageProbability) && payload.languageProbability >= 0 && payload.languageProbability <= 1)) &&
+        (payload.recognitionQuality === undefined || (0, faster_whisper_adapter_1.isRecognitionQuality)(payload.recognitionQuality)) &&
+        (payload.inference_time === undefined || (typeof payload.inference_time === 'number' &&
+            Number.isFinite(payload.inference_time) && payload.inference_time >= 0 &&
+            Number.isFinite(payload.inference_time * 1000)));
 }
 function pcmWav(pcm) {
     const wav = Buffer.alloc(44 + pcm.length);

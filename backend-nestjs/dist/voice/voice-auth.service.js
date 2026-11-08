@@ -108,7 +108,7 @@ let VoiceAuthService = class VoiceAuthService {
                 ttsVoiceFallback: typeof row.tts_voice_fallback === 'string' ? row.tts_voice_fallback : null,
                 speechRate,
                 vadSensitivity: Number(row.vad_sensitivity),
-                endpointSilenceMs: clamp(Number(row.endpoint_silence_ms), 300, 2000, 700),
+                endpointSilenceMs: clamp(Number(row.endpoint_silence_ms), 300, 2000, 1000),
                 minSpeechMs: clamp(Number(row.min_speech_ms), 20, 500, 80),
                 silenceNudgeMs: clamp(Number(row.silence_nudge_after_s), 5, 60, 10) * 1000,
                 bargeInEnabled: Number(row.barge_in_enabled) === 1,

@@ -8,6 +8,7 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var FasterWhisperAdapter_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.FasterWhisperAdapter = void 0;
+exports.isRecognitionQuality = isRecognitionQuality;
 const common_1 = require("@nestjs/common");
 const voice_provider_util_1 = require("../voice-provider.util");
 const LANGUAGES = new Set(['en', 'hi', 'te']);
@@ -34,6 +35,18 @@ let FasterWhisperAdapter = FasterWhisperAdapter_1 = class FasterWhisperAdapter {
             form.append('model', this.engineId);
             if (request.language !== 'auto')
                 form.append('language', request.language);
+            const vocabulary = (request.vocabulary ?? []).filter(name => name.length <= 120 &&
+                /^[\p{L}\p{N} .&'()+-]+$/u.test(name)).slice(0, 40);
+            let prompt = 'Product names: ';
+            let promptedNames = 0;
+            for (const name of vocabulary) {
+                if (prompt.length + name.length + 3 > 200)
+                    break;
+                prompt += `${promptedNames ? ', ' : ''}${name}`;
+                promptedNames++;
+            }
+            if (promptedNames)
+                form.append('initial_prompt', `${prompt}.`);
             return (0, voice_provider_util_1.fetchWithTimeout)(this.endpoint, {
                 method: 'POST',
                 body: form,
@@ -58,6 +71,11 @@ let FasterWhisperAdapter = FasterWhisperAdapter_1 = class FasterWhisperAdapter {
                 if (confidence !== undefined && (typeof confidence !== 'number' || confidence < 0 || confidence > 1)) {
                     throw new voice_provider_util_1.VoiceProviderError('VOICE_PROVIDER_INVALID');
                 }
+                const languageProbability = payload.languageProbability;
+                if (languageProbability !== undefined && (typeof languageProbability !== 'number' ||
+                    !Number.isFinite(languageProbability) || languageProbability < 0 || languageProbability > 1)) {
+                    throw new voice_provider_util_1.VoiceProviderError('VOICE_PROVIDER_INVALID');
+                }
                 const processingMs = payload.processingMs;
                 if (processingMs !== undefined && (typeof processingMs !== 'number' || !Number.isFinite(processingMs) || processingMs < 0)) {
                     throw new voice_provider_util_1.VoiceProviderError('VOICE_PROVIDER_INVALID');
@@ -78,6 +96,7 @@ let FasterWhisperAdapter = FasterWhisperAdapter_1 = class FasterWhisperAdapter {
                 return {
                     text: payload.text,
                     language: payload.language,
+                    ...(typeof languageProbability === 'number' ? { languageProbability } : {}),
                     confidence: confidence,
                     isFinal: !request.partial,
                     ...(typeof processingMs === 'number' ? { processingMs } : {}),

@@ -30,6 +30,16 @@ export class FasterWhisperAdapter implements SpeechToTextPort {
       form.append('partial', String(request.partial));
       form.append('model', this.engineId);
       if (request.language !== 'auto') form.append('language', request.language);
+      const vocabulary = (request.vocabulary ?? []).filter(name => name.length <= 120 &&
+        /^[\p{L}\p{N} .&'()+-]+$/u.test(name)).slice(0, 40);
+      let prompt = 'Product names: ';
+      let promptedNames = 0;
+      for (const name of vocabulary) {
+        if (prompt.length + name.length + 3 > 200) break;
+        prompt += `${promptedNames ? ', ' : ''}${name}`;
+        promptedNames++;
+      }
+      if (promptedNames) form.append('initial_prompt', `${prompt}.`);
 
       return fetchWithTimeout(this.endpoint, {
         method: 'POST',
@@ -53,6 +63,11 @@ export class FasterWhisperAdapter implements SpeechToTextPort {
       if (confidence !== undefined && (typeof confidence !== 'number' || confidence < 0 || confidence > 1)) {
         throw new VoiceProviderError('VOICE_PROVIDER_INVALID');
       }
+      const languageProbability = payload.languageProbability;
+      if (languageProbability !== undefined && (typeof languageProbability !== 'number' ||
+          !Number.isFinite(languageProbability) || languageProbability < 0 || languageProbability > 1)) {
+        throw new VoiceProviderError('VOICE_PROVIDER_INVALID');
+      }
       const processingMs = payload.processingMs;
       if (processingMs !== undefined && (typeof processingMs !== 'number' || !Number.isFinite(processingMs) || processingMs < 0)) {
         throw new VoiceProviderError('VOICE_PROVIDER_INVALID');
@@ -73,6 +88,7 @@ export class FasterWhisperAdapter implements SpeechToTextPort {
       return {
         text: payload.text,
         language: payload.language as VoiceLanguage,
+        ...(typeof languageProbability === 'number' ? { languageProbability } : {}),
         confidence: confidence as number | undefined,
         isFinal: !request.partial,
         ...(typeof processingMs === 'number' ? { processingMs } : {}),
@@ -104,7 +120,7 @@ function isSttTimings(value: unknown): value is SttTimings {
   ].every(key => typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key] >= 0);
 }
 
-function isRecognitionQuality(value: unknown): value is NonNullable<SttResult['recognitionQuality']> {
+export function isRecognitionQuality(value: unknown): value is NonNullable<SttResult['recognitionQuality']> {
   if (!isRecord(value) || typeof value.reliable !== 'boolean' ||
       !['accepted', 'no_speech', 'low_log_probability', 'likely_no_speech'].includes(String(value.reason))) return false;
   if ((value.reason === 'accepted') !== value.reliable) return false;

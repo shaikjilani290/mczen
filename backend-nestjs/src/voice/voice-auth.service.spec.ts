@@ -78,7 +78,7 @@ describe('VoiceAuthService', () => {
           tts_voice_fallback: null,
           speech_rate: 1,
           vad_sensitivity: 0.5,
-          endpoint_silence_ms: 700,
+          endpoint_silence_ms: 1000,
           min_speech_ms: 80,
           barge_in_enabled: 1,
           silence_nudge_after_s: 15,
@@ -111,6 +111,7 @@ describe('VoiceAuthService', () => {
     expect(resolved.allowedLanguages).toEqual(['en', 'te']);
     expect(resolved.ttsLanguages).toEqual(['en']);
     expect(resolved.settings.silenceNudgeMs).toBe(15_000);
+    expect(resolved.settings.endpointSilenceMs).toBe(1000);
     expect(resolved.defaultLanguage).toBe('en');
     await expect(service.resolveSettings(tenantId, assistantId, 'te')).resolves.toEqual(
       expect.objectContaining({
@@ -119,6 +120,18 @@ describe('VoiceAuthService', () => {
         settings: expect.objectContaining({ ttsVoice: null }),
       }),
     );
+  });
+  it.each([
+    [undefined, 1000], ['invalid', 1000], [100, 300], [2500, 2000], [700, 700],
+  ])('uses the 1000ms fallback while preserving clamped or explicit settings: %s', async (configured, expected) => {
+    const database = { query: jest.fn().mockResolvedValue([{
+      speech_enabled: 1, stt_engine: 'faster-whisper-small-int8', stt_language_hint: 'auto',
+      tts_engine: 'piper', speech_rate: 1, vad_sensitivity: 0.5, endpoint_silence_ms: configured,
+      min_speech_ms: 80, barge_in_enabled: 1, silence_nudge_after_s: 15, session_idle_timeout_s: 300,
+      language_code: 'en', is_default: 1, voice_enabled: 1, tts_voice: 'en_US-amy-medium', tts_rate: null,
+    }]) };
+    const service = new VoiceAuthService({} as TokenService, {} as AuthStore, database as unknown as DataSource);
+    expect((await service.resolveSettings(tenantId, assistantId, 'auto')).settings.endpointSilenceMs).toBe(expected);
   });
 
   it('rejects inaccessible assistants without leaking whether another tenant owns them', async () => {

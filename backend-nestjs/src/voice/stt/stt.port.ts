@@ -12,6 +12,7 @@ export interface SttRequest {
 export interface SttResult {
   text: string;
   language: VoiceLanguage;
+  languageProbability?: number;
   confidence?: number;
   isFinal: boolean;
   processingMs?: number;

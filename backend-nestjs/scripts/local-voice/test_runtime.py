@@ -201,9 +201,9 @@ class RuntimeTests(unittest.TestCase):
                 self.received.append((audio.copy(), kwargs))
                 segment = SimpleNamespace(text=" Open my cart.", start=0, end=1,
                                           avg_logprob=-0.2, no_speech_prob=0.01)
-                return iter([segment]), SimpleNamespace(language=kwargs["language"] or "en")
+                return iter([segment]), SimpleNamespace(language=kwargs["language"] or "en", language_probability=0.95)
 
-        with patch("stt_profile.ProfiledWhisperModel", FakeWhisper):
+        with patch.dict(os.environ, {}, clear=True), patch("stt_profile.ProfiledWhisperModel", FakeWhisper):
             app = create_app("stt", Path("models"), english_model="base.en")
         endpoint = next(route.endpoint for route in app.routes if route.path == "/transcribe")
         original = np.arange(-320, 320, dtype="<i2")
@@ -211,17 +211,44 @@ class RuntimeTests(unittest.TestCase):
         for language in ("en", "hi", "te", None):
             result = endpoint(request=request, file=SimpleNamespace(file=BytesIO(original.tobytes())),
                               encoding="pcm_s16le", sample_rate=16000, channels=1,
-                              partial=False, model="faster-whisper-small-int8", language=language)
+                              partial=False, model="faster-whisper-small-int8", language=language,
+                              initial_prompt="Product names: ZENAGE, HALE.O.")
             self.assertEqual(result["text"], "Open my cart.")
+            self.assertEqual(result["languageProbability"], 0.95)
             selected = created[1] if language == "en" else created[0]
             audio, options = selected.received[-1]
             np.testing.assert_array_equal(audio, original.astype(np.float32) / 32768)
             self.assertFalse(options.get("vad_filter", False))
-            self.assertEqual(options["beam_size"], 1)
+            self.assertEqual(options["beam_size"], 5)
+            self.assertEqual(options["temperature"], [0.0, 0.2, 0.4])
+            self.assertFalse(options["condition_on_previous_text"])
+            self.assertEqual(options["initial_prompt"], "Product names: ZENAGE, HALE.O.")
             self.assertEqual(result["timings"]["encoderMs"], 2)
             self.assertTrue(all(value >= 0 for value in result["timings"].values()))
         self.assertIn("whisper-small", created[0].path)
         self.assertIn("whisper-base.en", created[1].path)
+        with patch.dict(os.environ, {"VOICE_STT_BEAM_SIZE": "3"}), patch("stt_profile.ProfiledWhisperModel", FakeWhisper):
+            configured_app = create_app("stt", Path("models"))
+        endpoint = next(route.endpoint for route in configured_app.routes if route.path == "/transcribe")
+        endpoint(request=request, file=SimpleNamespace(file=BytesIO(original.tobytes())),
+                 encoding="pcm_s16le", sample_rate=16000, channels=1,
+                 partial=False, model="faster-whisper-small-int8", language="en", initial_prompt=None)
+        self.assertEqual(created[-1].received[-1][1]["beam_size"], 3)
+        self.assertIsNone(created[-1].received[-1][1]["initial_prompt"])
+        schema = configured_app.openapi()["components"]["schemas"]
+        transcribe_schema = next(value for key, value in schema.items() if key.startswith("Body_transcribe"))
+        self.assertEqual(transcribe_schema["properties"]["initial_prompt"]["anyOf"][0]["maxLength"], 200)
+
+    def test_stt_beam_size_rejects_invalid_configuration(self):
+        for value in ("0", "-1", "invalid"):
+            with self.subTest(value=value), patch.dict(os.environ, {"VOICE_STT_BEAM_SIZE": value}):
+                with self.assertRaises(ValueError):
+                    create_app("stt", Path("models"))
+
+    def test_profile_wrapper_inherits_transcribe_without_discarding_options(self):
+        from faster_whisper import WhisperModel
+
+        self.assertIs(ProfiledWhisperModel.transcribe, WhisperModel.transcribe)
 
     def test_stt_profiling_is_request_local_and_cleans_up_on_failure(self):
         model = ProfiledWhisperModel.__new__(ProfiledWhisperModel)

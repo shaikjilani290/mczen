@@ -61,6 +61,7 @@ export interface VoiceSession {
     recentViolationTimes: number[];
     vadPending: Buffer;
     speechMs: number;
+    bargeInSpeechMs?: number;
     silenceMs: number;
     turnsCompleted: number;
     interrupts: number;

@@ -41,6 +41,7 @@ exports.MAX_SESSION_MS = 60 * 60_000;
 const RESUME_TTL_MS = 120_000;
 const RESUME_ROTATE_MS = 30_000;
 const FRAME_BYTES = 640;
+const BARGE_IN_SPEECH_MS = 300;
 const PARTIAL_WINDOW_BYTES = 3 * 32_000;
 const EVENT_LIMIT = 50;
 const FRAME_LIMIT = 40;
@@ -611,8 +612,17 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             if (session.epoch !== epoch)
                 return;
             const speech = result.speech && result.probability >= session.context.settings.vadSensitivity;
+            if (!speech || session.state !== 'speaking')
+                session.bargeInSpeechMs = 0;
             if (speech) {
                 if (session.state === 'speaking' && session.context.settings.bargeInEnabled) {
+                    session.bargeInSpeechMs = (session.bargeInSpeechMs ?? 0) + 20;
+                    if (session.bargeInSpeechMs < BARGE_IN_SPEECH_MS) {
+                        extended.preRoll.push(Buffer.from(vadFrame));
+                        while (extended.preRoll.length > 50)
+                            extended.preRoll.shift();
+                        continue;
+                    }
                     await this.interrupt(session, 'vad_barge_in');
                     epoch = session.epoch;
                 }
@@ -769,7 +779,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                 return;
             }
             const text = normalizeTranscript(result.text, 2000);
-            this.logger.log({
+            this.logger.debug({
                 event: 'voice_product_transcript', requestId: session.timing?.turnId,
                 audioBytes: audio.length, audioMs: audio.length / 32,
                 rawLength: result.text.length, normalizedLength: text.length,
@@ -783,7 +793,11 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                 await this.resetTurn(session, 'turn_reset');
                 return;
             }
-            session.context.language = session.context.language === 'auto' ? result.language : session.context.language;
+            if (session.context.language === 'auto' && result.recognitionQuality?.reliable === true &&
+                (result.languageProbability === undefined || result.languageProbability >= 0.8) &&
+                session.context.allowedLanguages.includes(result.language)) {
+                session.context.language = result.language;
+            }
             if (session.timing) {
                 session.timing.sttMs = sttMs;
                 session.timing.sttProcessingMs = result.processingMs;
@@ -803,9 +817,20 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                 sttProcessingMs: result.processingMs,
                 sttTimings: result.timings,
                 recognitionQuality: result.recognitionQuality,
+                languageProbability: result.languageProbability,
             }, session);
             await this.recordEvent(session, 'transcript_final', `language_${result.language}`);
-            await this.invokeAgent(session, text, epoch, result.recognitionQuality?.reliable !== false);
+            if (result.recognitionQuality?.reliable === false) {
+                this.sendError(session, 'STT_UNAVAILABLE', 'I did not catch that clearly. Please repeat your request.', true);
+                await this.resetTurn(session, 'recovered');
+                return;
+            }
+            if (session.context.language === 'auto') {
+                this.sendError(session, 'STT_UNAVAILABLE', 'I did not catch the language clearly. Please repeat or choose a language.', true);
+                await this.resetTurn(session, 'recovered');
+                return;
+            }
+            await this.invokeAgent(session, text, epoch);
         }
         catch (error) {
             if (session.epoch !== epoch || !this.sessions.has(session.id) || controller.signal.aborted)
@@ -1092,6 +1117,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.turnId = undefined;
         session.currentAudio = [];
         session.currentAudioBytes = 0;
+        session.bargeInSpeechMs = 0;
         session.audioQueue = [];
         session.pendingAudioBytes = 0;
         session.flowPaused = false;
@@ -1111,6 +1137,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.preRoll = [];
         session.vadPending = Buffer.alloc(0);
         session.speechMs = 0;
+        session.bargeInSpeechMs = 0;
         session.silenceMs = 0;
         session.utteranceStartedAt = undefined;
         session.lastPartialAt = undefined;

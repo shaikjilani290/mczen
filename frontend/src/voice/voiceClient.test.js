@@ -111,6 +111,35 @@ function fakeAudioContext() {
     },
   };
 }
+for (const sampleRate of [16000, 44100, 48000]) {
+  test(`reports fallback resampling only for a non-16000Hz AudioContext: ${sampleRate}`, async t => {
+    const diagnostics = [];
+    const warnings = [];
+    t.mock.method(console, "warn", (...args) => warnings.push(args));
+    const context = fakeAudioContext();
+    context.sampleRate = sampleRate;
+    const client = new VoiceClient({
+      audioContextFactory: () => context,
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    client.shouldReconnect = true;
+    try {
+      await client.startAudioCapture();
+      const resampling = diagnostics.filter(event => event.stage === "audio_resampler");
+      assert.equal(warnings.length, sampleRate === 16000 ? 0 : 1);
+      assert.equal(resampling.length, sampleRate === 16000 ? 0 : 1);
+      if (sampleRate !== 16000) {
+        assert.equal(resampling[0].sourceSampleRate, sampleRate);
+        assert.equal(resampling[0].wireSampleRate, 16000);
+        assert.equal(resampling[0].fallbackResampler, true);
+        assert.match(resampling[0].message, /fallback resampler is in use/);
+      }
+    } finally {
+      await client.stop();
+    }
+  });
+}
 
 for (const rejection of ["SESSION_MISMATCH", "UNAUTHORIZED"]) {
   test(`reconnect handles ${rejection} without bypassing authentication or looping terminal failures`, async t => {

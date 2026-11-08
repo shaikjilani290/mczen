@@ -507,6 +507,13 @@ export class VoiceClient {
     this.stream = stream;
     this.diagnose("microphone_granted");
     this.audioContext = this.audioContextFactory();
+    if (this.audioContext.sampleRate !== 16000) {
+      const message = `AudioContext is running at ${this.audioContext.sampleRate} Hz; the fallback resampler is in use for 16000 Hz voice audio.`;
+      console.warn("[McZEN:voice]", message);
+      this.onDiagnostic({ stage: "audio_resampler", sessionId: this.sessionId,
+        sourceSampleRate: this.audioContext.sampleRate, wireSampleRate: 16000,
+        fallbackResampler: true, message });
+    }
     if (this.audioDiagnostics) {
       const settings = stream.getAudioTracks?.()[0]?.getSettings?.() ?? {};
       this.onDiagnostic({ stage: "audio_format", sessionId: this.sessionId,

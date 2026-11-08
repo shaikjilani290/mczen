@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from itertools import chain
 import json
 import math
+import os
 import logging
 import sys
 from pathlib import Path
@@ -248,6 +249,9 @@ def create_app(service: str, directory: Path, english_model: str = "small", reco
     if service == "stt":
         from stt_profile import ProfiledWhisperModel
 
+        beam_size = int(os.environ.get("VOICE_STT_BEAM_SIZE", "5"))
+        if beam_size < 1:
+            raise ValueError("VOICE_STT_BEAM_SIZE must be a positive integer.")
         loading_at = time.perf_counter()
         whisper = ProfiledWhisperModel(
             str(directory / "whisper-small"),
@@ -290,6 +294,7 @@ def create_app(service: str, directory: Path, english_model: str = "small", reco
             partial: bool = Form(),
             model: str = Form(),
             language: str | None = Form(default=None),
+            initial_prompt: str | None = Form(default=None, max_length=200),
         ):
             dispatched_at = time.perf_counter()
             if (encoding != "pcm_s16le" or sample_rate != 16000 or channels != 1
@@ -308,8 +313,9 @@ def create_app(service: str, directory: Path, english_model: str = "small", reco
                 admitted_at = time.perf_counter()
                 with selected.profiling() as stages:
                     segments, info = selected.transcribe(
-                        audio, language=language, beam_size=1, best_of=1, temperature=0,
+                        audio, language=language, beam_size=beam_size, temperature=[0.0, 0.2, 0.4],
                         condition_on_previous_text=False, vad_filter=False,
+                        initial_prompt=initial_prompt,
                     )
                     segments = list(segments)
                 inferred_at = time.perf_counter()
@@ -339,7 +345,8 @@ def create_app(service: str, directory: Path, english_model: str = "small", reco
                 "partial": partial, "cpuThreads": 6 if selected_model == "small" else 4,
                 "model": f"whisper-{selected_model}", "computeType": "int8",
             }))
-            return {"text": text[:8000], "language": info.language, "processingMs": processing_ms,
+            return {"text": text[:8000], "language": info.language, "languageProbability": info.language_probability,
+                    "processingMs": processing_ms,
                     "recognitionQuality": quality, "timings": timings}
 
     elif service == "vad":

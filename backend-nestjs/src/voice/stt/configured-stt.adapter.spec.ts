@@ -84,6 +84,32 @@ describe('configured local/remote STT', () => {
     expect(adapter.engineId).toBe(local.engineId);
     expect(adapter.supportsPartial).toBe(false);
   });
+  it.each([true, false])('preserves large-v3 recognition quality and language probability: %s', async reliable => {
+    const recognitionQuality = { reliable, reason: reliable ? 'accepted' : 'low_log_probability',
+      avgLogProbability: reliable ? -0.2 : -1.2, noSpeechProbability: 0.1 };
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      ...response, model: 'large-v3', compute_type: 'int8_float32',
+      languageProbability: 0.95, recognitionQuality, inference_time: 1.25,
+    })));
+    expect(await new ConfiguredSttAdapter(local).transcribe(request())).toMatchObject({
+      text: response.transcript, languageProbability: 0.95, recognitionQuality,
+    });
+    expect(localTranscribe).not.toHaveBeenCalled();
+    expect(Logger.prototype.log).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'voice_remote_stt_timing', activeModel: 'large-v3', inferenceMs: 1250,
+    }));
+  });
+  it.each([
+    { languageProbability: 2 },
+    { languageProbability: null },
+    { recognitionQuality: { reliable: true, reason: 'low_log_probability' } },
+    { recognitionQuality: { reliable: false, reason: 'accepted' } },
+    { inference_time: -1 },
+  ])('rejects malformed large-v3 quality/timing and retains local fallback: %j', async extra => {
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ...response, ...extra })));
+    expect((await new ConfiguredSttAdapter(local).transcribe(request())).text).toBe('Local transcript');
+    expect(localTranscribe).toHaveBeenCalledTimes(1);
+  });
 
   it('sends bearer auth/correlation and a lossless WAV file, preserving exact transcript and timings', async () => {
     const fetch = jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(response)));

@@ -8,3 +8,4 @@ export declare class FasterWhisperAdapter implements SpeechToTextPort {
     transcribe(request: SttRequest): Promise<SttResult>;
     healthCheck(): Promise<boolean>;
 }
+export declare function isRecognitionQuality(value: unknown): value is NonNullable<SttResult['recognitionQuality']>;

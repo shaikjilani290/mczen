@@ -24,7 +24,7 @@ const settings: VoiceSettings = {
   ttsVoiceFallback: null,
   speechRate: 1,
   vadSensitivity: 0.5,
-  endpointSilenceMs: 700,
+  endpointSilenceMs: 1000,
   minSpeechMs: 80,
   silenceNudgeMs: 10_000,
   bargeInEnabled: true,
@@ -97,6 +97,7 @@ describe('VoiceSessionManager', () => {
       language: 'en',
       confidence: 0.99,
       isFinal: true,
+      recognitionQuality: { reliable: true, reason: 'accepted' },
     });
     stt = {
       engineId: 'faster-whisper-small-int8',
@@ -208,7 +209,7 @@ describe('VoiceSessionManager', () => {
         if (outcome !== 'remote') return new Response('', { status: 401 });
         return new Response(JSON.stringify({
           success: true, transcript: 'Hello McZEN.', language: 'en',
-          audio_duration: 0.8, processing_time: 0.43, speed: 1.86,
+          audio_duration: 1.1, processing_time: 0.43, speed: 2.56,
           device: 'cuda', model: 'small', compute_type: 'int8',
         }));
       });
@@ -217,8 +218,9 @@ describe('VoiceSessionManager', () => {
       }
       try {
         manager = makeManager(new ConfiguredSttAdapter(local));
-        const sessionId = await beginSession();
-        for (let index = 0; index < 8; index++) {
+        await manager.begin(socket, identity, { assistantId, language: 'en' }, 'Chrome/123');
+        const sessionId = String(sentEvents.find(event => event.type === 'voice.session.started')?.sessionId);
+        for (let index = 0; index < 11; index++) {
           manager.handleBinary(socket, frame(index, 1, 3200));
           await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
         }
@@ -532,7 +534,7 @@ describe('VoiceSessionManager', () => {
   });
   it('persists voice modality and emits the agent response contract through a completed turn', async () => {
     await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
 
     await waitFor(() => sentEvents.some((event) => event.type === 'voice.assistant.turn.end'));
     expect(agentInvoke).toHaveBeenCalledWith(
@@ -558,6 +560,51 @@ describe('VoiceSessionManager', () => {
     }));
     expect(conversationCreate).toHaveBeenCalledWith(expect.objectContaining({ channel: 'voice' }));
   });
+  it.each([
+    { recognitionQuality: { reliable: false, reason: 'low_log_probability' }, languageProbability: 0.99 },
+    { recognitionQuality: { reliable: true, reason: 'accepted' }, languageProbability: 0.4 },
+    { languageProbability: 0.99 },
+  ])('does not lock auto language on unreliable or unverified detection: %j', async detection => {
+    sttTranscribe.mockResolvedValue({ text: 'Explain ZENAGE.', language: 'hi', isFinal: true, ...detection });
+    await beginSession();
+    const session = persistence.create.mock.calls[0][0];
+    for (let index = 0; index < 3; index++) {
+      manager.handleBinary(socket, frame(index, 1, 12800));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 20);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.epoch'));
+    expect(session.context.language).toBe('auto');
+    expect(session.state).toBe('listening');
+    expect(agentInvoke).not.toHaveBeenCalled();
+    expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
+      rawText: 'Explain ZENAGE.', language: 'hi',
+    }));
+  });
+  it('locks reliable high-probability auto detection but preserves an explicitly selected language', async () => {
+    sttTranscribe.mockResolvedValue({ text: 'Hello.', language: 'hi', isFinal: true,
+      languageProbability: 0.95, recognitionQuality: { reliable: true, reason: 'accepted' } });
+    await beginSession();
+    for (let index = 0; index < 3; index++) {
+      manager.handleBinary(socket, frame(index, 1, 12800));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 20);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(persistence.create.mock.calls[0][0].context.language).toBe('hi');
+    expect(agentInvoke).toHaveBeenCalledWith('Hello.', expect.objectContaining({ language: 'hi' }), expect.any(AbortSignal));
+    await manager.closeAll();
+    sentEvents.length = 0;
+    manager = makeManager();
+    vad.detect.mockClear();
+    let calls = 0;
+    vad.detect.mockImplementation(async () => ({ speech: ++calls <= 5, probability: 0.99 }));
+    await manager.begin(socket, identity, { assistantId, language: 'en' }, 'Chrome/123');
+    for (let index = 0; index < 3; index++) {
+      manager.handleBinary(socket, frame(index, 1, 12800));
+      await waitFor(() => calls >= (index + 1) * 20);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(persistence.create.mock.calls[1][0].context.language).toBe('en');
+  });
 
   it('uses a distinct idempotency request ID per spoken turn while preserving the merchant session', async () => {
     const merchant = { integrationId: newUuidv7(), sessionId: 'merchant-visitor', origin: 'https://shop.example' };
@@ -570,7 +617,7 @@ describe('VoiceSessionManager', () => {
       vad.detect.mockImplementation(async () => ({ speech: ++calls <= 5, probability: 0.99 }));
       sttTranscribe.mockResolvedValue({ text: turn ? 'Add one more.' : 'Add this product to my cart.', language: 'en', isFinal: true });
       for (let index = 0; index < 40; index++) {
-        manager.handleBinary(socket, frame(index, turn + 1));
+        manager.handleBinary(socket, frame(index, turn + 1, 960));
         await new Promise(resolve => setTimeout(resolve, 20));
       }
       await waitFor(() => sentEvents.filter(event => event.type === 'voice.assistant.epoch').length === turn + 1);
@@ -592,22 +639,23 @@ describe('VoiceSessionManager', () => {
     const pending = new Promise<void>((resolve) => { release = resolve; });
     sttTranscribe.mockImplementation(async () => {
       await pending;
-      return { text: 'Hello McZEN.', language: 'en', isFinal: true };
+      return { text: 'Hello McZEN.', language: 'en', isFinal: true,
+        recognitionQuality: { reliable: true, reason: 'accepted' } };
     });
     let calls = 0;
     vad.detect.mockImplementation(async () => ({ speech: ++calls <= 4, probability: 0.99 }));
     await beginSession();
     try {
-      for (let index = 0; index < 39; index++) manager.handleBinary(socket, frame(index));
+      for (let index = 0; index < 39; index++) manager.handleBinary(socket, frame(index, 1, 1280));
       await waitFor(() => sttTranscribe.mock.calls.length > 0);
       expect(sentEvents.some((event) => event.type === 'voice.assistant.thinking' &&
         (event.data as Record<string, unknown>)?.hint === 'transcribing')).toBe(true);
-      manager.handleBinary(socket, frame(39));
-      await waitFor(() => calls === 40);
+      manager.handleBinary(socket, frame(39, 1, 1280));
+      await waitFor(() => calls === 80);
       await waitFor(() => sentEvents.filter((e) => e.type === 'voice.audio.ack').length === 40);
       expect(sentEvents.filter((e) => e.type === 'voice.audio.ack')
         .map((e) => (e.data as Record<string, unknown>).sequence)).toEqual(Array.from({ length: 40 }, (_, i) => i));
-      expect(sttTranscribe.mock.calls[0][0].audio.data.length).toBe(39 * 640);
+      expect(sttTranscribe.mock.calls[0][0].audio.data.length).toBe(27 * 1280);
       expect(sentEvents.some((event) => (event.data as Record<string, unknown>)?.code === 'INGRESS_BACKPRESSURE')).toBe(false);
     } finally {
       release?.();
@@ -729,7 +777,8 @@ describe('VoiceSessionManager', () => {
     const preview = new Promise<void>((resolve) => { releasePreview = resolve; });
     sttTranscribe.mockImplementation(async (request: { partial: boolean }) => {
       if (request.partial) await preview;
-      return { text: 'Hello McZEN.', language: 'en', isFinal: !request.partial };
+      return { text: 'Hello McZEN.', language: 'en', isFinal: !request.partial,
+        recognitionQuality: { reliable: true, reason: 'accepted' } };
     });
     let calls = 0;
     vad.detect.mockImplementation(async () => ({ speech: ++calls <= 159, probability: 0.99 }));
@@ -816,7 +865,7 @@ describe('VoiceSessionManager', () => {
       }));
       await beginSession();
       const expected: Buffer[] = [];
-      for (let index = 0; index < 9; index++) {
+      for (let index = 0; index < 12; index++) {
         const packet = frame(index, 1, 3200);
         for (let offset = 11; offset < packet.length; offset += 2) {
           packet.writeInt16LE((index * 5 + Math.floor((offset - 11) / 640)) * 100, offset);
@@ -829,11 +878,11 @@ describe('VoiceSessionManager', () => {
       expect(sttTranscribe).toHaveBeenCalledTimes(1);
       expect(sttTranscribe.mock.calls[0][0].audio.data.equals(Buffer.concat(expected))).toBe(true);
       expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
-        audioMs: 900,
-        buffering: { preRollMs: 100, trailingSilenceMs: 700, vadSpeechMs: 100, reason: 'silence' },
+        audioMs: 1200,
+        buffering: { preRollMs: 100, trailingSilenceMs: 1000, vadSpeechMs: 100, reason: 'silence' },
         audioDiagnostics: expect.objectContaining({
-          finalStt: expect.objectContaining({ samples: 14400, audioMs: 900, clippingPercent: 0 }),
-          ingress: expect.objectContaining({ packets: 9, missingPackets: 0, reorderedPackets: 0 }),
+          finalStt: expect.objectContaining({ samples: 19200, audioMs: 1200, clippingPercent: 0 }),
+          ingress: expect.objectContaining({ packets: 12, missingPackets: 0, reorderedPackets: 0 }),
         }),
       }));
     } finally {
@@ -847,22 +896,106 @@ describe('VoiceSessionManager', () => {
       text: 'Open mic heart.', language: 'en', isFinal: true,
       recognitionQuality: { reliable: false, reason: 'low_log_probability', avgLogProbability: -1.2 },
     });
-    await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
-    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    await manager.begin(socket, identity, { assistantId, language: 'en' }, 'Chrome/123');
+    const stream = jest.fn();
+    agent.stream = stream;
+    for (let index = 0; index < 3; index++) {
+      manager.handleBinary(socket, frame(index, 1, 12800));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 20);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.epoch'));
     expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
       text: 'Open mic heart.', recognitionQuality: expect.objectContaining({ reliable: false }),
     }));
-    expect(sentEvents.find(event => event.type === 'voice.assistant.response')?.data).toEqual(expect.objectContaining({
-      answer: 'I could not hear that clearly. Please repeat your request.',
+    expect(sentEvents.find(event => event.type === 'voice.session.error')?.data).toEqual(expect.objectContaining({
+      code: 'STT_UNAVAILABLE', recoverable: true,
+      message: 'I did not catch that clearly. Please repeat your request.',
     }));
     expect(agentInvoke).not.toHaveBeenCalled();
-    expect(tts.synthesize).toHaveBeenCalled();
+    expect(stream).not.toHaveBeenCalled();
+    expect(conversationCreate).not.toHaveBeenCalled();
+    expect(tts.synthesize).not.toHaveBeenCalled();
+    expect(persistence.create.mock.calls[0][0].state).toBe('listening');
+    let calls = 0;
+    vad.detect.mockImplementation(async () => ({ speech: ++calls <= 5, probability: 0.99 }));
+    sttTranscribe.mockResolvedValue({ text: 'Hello again.', language: 'en', isFinal: true,
+      recognitionQuality: { reliable: true, reason: 'accepted' } });
+    delete agent.stream;
+    for (let index = 0; index < 3; index++) {
+      manager.handleBinary(socket, frame(index, 2, 12800));
+      await waitFor(() => calls >= (index + 1) * 20);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(agentInvoke).toHaveBeenCalledTimes(1);
+    expect(agentInvoke).toHaveBeenCalledWith('Hello again.', expect.anything(), expect.any(AbortSignal));
+  });
+  it('keeps an 800ms mid-sentence pause open and endpoints only after 1000ms silence', async () => {
+    Object.defineProperty(stt, 'supportsPartial', { value: false });
+    await beginSession();
+    const push = async (sequence: number, frames: number) => {
+      const count = vad.detect.mock.calls.length + frames;
+      manager.handleBinary(socket, frame(sequence, 1, frames * 640));
+      await waitFor(() => vad.detect.mock.calls.length >= count);
+    };
+    await push(0, 5);
+    vad.detect.mockResolvedValue({ speech: false, probability: 0 });
+    await push(1, 20);
+    await push(2, 20);
+    expect(sttTranscribe).not.toHaveBeenCalled();
+    vad.detect.mockResolvedValue({ speech: true, probability: 0.99 });
+    await push(3, 5);
+    vad.detect.mockResolvedValue({ speech: false, probability: 0 });
+    await push(4, 20);
+    await push(5, 20);
+    expect(sttTranscribe).not.toHaveBeenCalled();
+    await push(6, 10);
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
+      buffering: expect.objectContaining({ trailingSilenceMs: 1000, vadSpeechMs: 200 }),
+    }));
+  });
+  it.each([1, 5, 14])('ignores %i consecutive 20ms VAD frames during playback below the 300ms threshold', async frames => {
+    await beginSession();
+    const session = persistence.create.mock.calls[0][0];
+    session.state = 'speaking';
+    vad.detect.mockResolvedValue({ speech: true, probability: 0.99 });
+    manager.handleBinary(socket, frame(0, 1, frames * 640));
+    await waitFor(() => vad.detect.mock.calls.length >= frames);
+    await session.processing;
+    expect(session.state).toBe('speaking');
+    expect(session.epoch).toBe(1);
+    expect(session.bargeInSpeechMs).toBe(frames * 20);
+    expect(sentEvents.some(event => event.type === 'voice.assistant.interrupt')).toBe(false);
+  });
+  it('requires continuous speech and interrupts at 300ms with onset samples retained', async () => {
+    await beginSession();
+    const session = persistence.create.mock.calls[0][0];
+    session.state = 'speaking';
+    let sequence = 0;
+    const push = async (speech: boolean, frames: number) => {
+      vad.detect.mockResolvedValue({ speech, probability: speech ? 0.99 : 0 });
+      const count = vad.detect.mock.calls.length + frames;
+      manager.handleBinary(socket, frame(sequence++, session.epoch, frames * 640));
+      await waitFor(() => vad.detect.mock.calls.length >= count);
+      await session.processing;
+    };
+    await push(true, 5);
+    await push(false, 1);
+    expect(session.bargeInSpeechMs).toBe(0);
+    await push(true, 14);
+    expect(sentEvents.some(event => event.type === 'voice.assistant.interrupt')).toBe(false);
+    await push(true, 1);
+    expect(sentEvents.filter(event => event.type === 'voice.assistant.interrupt')).toHaveLength(1);
+    expect(session.epoch).toBe(2);
+    expect(session.currentAudioBytes).toBeGreaterThanOrEqual(15 * 640);
+    expect(session.bargeInSpeechMs).toBe(0);
+    expect(persistenceEvent).toHaveBeenCalledWith(session, 'interrupt', 'vad_barge_in');
   });
   it('retains raw STT text separately and never renames a product during whitespace normalization', async () => {
-    sttTranscribe.mockResolvedValue({ text: '  Explain  ZENAGE.\n', language: 'en', isFinal: true });
+    sttTranscribe.mockResolvedValue({ text: '  Explain  ZENAGE.\n', language: 'en', isFinal: true,
+      recognitionQuality: { reliable: true, reason: 'accepted' } });
     await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
     await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
     expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
       rawText: '  Explain  ZENAGE.\n', text: 'Explain ZENAGE.',
@@ -892,7 +1025,7 @@ describe('VoiceSessionManager', () => {
       throw new Error('Provider failed');
     });
     await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
     await waitFor(() => sentEvents.some(event => event.type === 'voice.session.error'));
     const error = sentEvents.find(event => event.type === 'voice.session.error');
     expect(error?.data).toEqual(expect.objectContaining({ code: 'TTS_UNAVAILABLE', recoverable: true }));
@@ -904,7 +1037,7 @@ describe('VoiceSessionManager', () => {
     const answer = `HALE.O costs 10.50 Indian rupees. ${'Stored product information '.repeat(30).trim()}`;
     agentInvoke.mockResolvedValue({ success: true, answer, model: 'verified-catalogue', toolCalls: [], sources: [] });
     await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
     await waitFor(() => sentEvents.some((event) => event.type === 'voice.assistant.turn.end'));
     const segments = tts.synthesize.mock.calls.map(([request]) => request.text);
     expect(segments[0]).toBe('HALE.O costs 10.50 Indian rupees.');
@@ -921,7 +1054,7 @@ describe('VoiceSessionManager', () => {
         toolCalls: [{ name: 'get_product_details', resultCount: 1 }], sources: [] } };
     });
     await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
     await waitFor(() => tts.synthesize.mock.calls.length > 0);
     expect(sentEvents.some(event => event.type === 'voice.assistant.turn.end')).toBe(false);
     finish();
@@ -938,7 +1071,7 @@ describe('VoiceSessionManager', () => {
       yield { response: { success: false, answer: 'The provider stream failed.', model: 'gpu', toolCalls: [], sources: [] } };
     });
     await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
     await waitFor(() => sentEvents.some(event => event.type === 'voice.session.error'));
     expect(sentEvents.find(event => event.type === 'voice.session.error')?.data).toEqual(
       expect.objectContaining({ code: 'AGENT_UNAVAILABLE' }));
@@ -958,7 +1091,7 @@ describe('VoiceSessionManager', () => {
     });
 
     const sessionId = await beginSession();
-    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index, 1, 960));
     await waitFor(() => sentEvents.some((event) => event.type === 'voice.assistant.audio.chunk'));
     await manager.handleText(socket, JSON.stringify({
       v: 1,

@@ -96,6 +96,51 @@ describe('voice provider adapters', () => {
       language: 'en', partial: false, signal: new AbortController().signal,
     })).rejects.toMatchObject({ code: 'VOICE_PROVIDER_INVALID' });
   });
+  it('sends a bounded local STT vocabulary prompt without splitting product names', async () => {
+    const request = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      text: 'Explain ZENAGE.', language: 'en',
+    })));
+    const adapter = new FasterWhisperAdapter();
+    const input = {
+      audio: { encoding: 'pcm_s16le' as const, sampleRate: 16000 as const, channels: 1 as const, data: Buffer.alloc(640) },
+      language: 'en' as const, partial: false, signal: new AbortController().signal,
+    };
+    await adapter.transcribe({ ...input, vocabulary: ['ZENAGE', 'LASS HEALTH', 'WEIZAP', 'HALE.O', 'AURA STRESS FREE COFFEE'] });
+    const body = request.mock.calls[0][1]?.body;
+    if (!(body instanceof FormData)) throw new Error('Expected multipart request.');
+    expect(body.get('initial_prompt')).toBe('Product names: ZENAGE, LASS HEALTH, WEIZAP, HALE.O, AURA STRESS FREE COFFEE.');
+    await adapter.transcribe({ ...input, vocabulary: ['ZENAGE', 'x'.repeat(121), 'invalid\nname',
+      ...Array.from({ length: 50 }, (_, index) => `PRODUCT ${index}`)] });
+    const bounded = request.mock.calls[1][1]?.body;
+    if (!(bounded instanceof FormData)) throw new Error('Expected multipart request.');
+    const prompt = bounded.get('initial_prompt');
+    expect(typeof prompt).toBe('string');
+    expect(String(prompt).length).toBeLessThanOrEqual(200);
+    expect(prompt).not.toContain('invalid');
+    expect(String(prompt)).toMatch(/(?:ZENAGE|PRODUCT \d+)\.$/);
+    await adapter.transcribe(input);
+    const noVocabulary = request.mock.calls[2][1]?.body;
+    if (!(noVocabulary instanceof FormData)) throw new Error('Expected multipart request.');
+    expect(noVocabulary.has('initial_prompt')).toBe(false);
+  });
+  it('preserves the local provider language detection probability', async () => {
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      text: 'Hello.', language: 'en', languageProbability: 0.95,
+    })));
+    expect(await new FasterWhisperAdapter().transcribe({
+      audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: Buffer.alloc(640) },
+      language: 'auto', partial: false, signal: new AbortController().signal,
+    })).toMatchObject({ languageProbability: 0.95 });
+  });
+  it.each([-0.1, 1.1, null, '0.95'])('rejects invalid language detection probability: %j', async languageProbability => {
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      text: 'Hello.', language: 'en', languageProbability,
+    })));
+    await expect(new FasterWhisperAdapter().transcribe({
+      audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: Buffer.alloc(640) },
+      language: 'auto', partial: false, signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'VOICE_PROVIDER_INVALID' });
+  });
     it.each(['timeout', 'abort'])('bounds stalled Piper body reads after headers: %s', async mode => {
       jest.useFakeTimers();
       const controller = new AbortController();
