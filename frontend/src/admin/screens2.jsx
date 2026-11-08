@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { voiceLibrary } from "./api.js";
 import { assistants, widget, tools, conversations, voice, platform } from "./api2.js";
 import { useLoad } from "./screens.jsx";
 
@@ -174,7 +175,9 @@ export function Assistants() {
   return (
     <div>
       <h2>Assistants</h2>
-      <button className="ad-primary" onClick={() => setCreating(true)}>Create assistant</button>
+      <div className="ad-actions" style={{ marginBottom: 12 }}>
+        <button className="ad-primary" onClick={() => setCreating(true)}>Create assistant</button>
+      </div>
       {creating && (
         <form className="ad-form ad-box" onSubmit={create}>
           <h3>Create assistant</h3>
@@ -402,6 +405,7 @@ export function VoiceSettings() {
   return (
     <div>
       <h2>Voice settings</h2>
+      <VoiceLibrary />
       <div className="ad-cards">
         {Object.entries(data.providers).map(([k, p]) => (
           <div className="ad-card" key={k}><b>{p.healthy ? "Healthy" : "Unavailable"}</b><span>{k.toUpperCase()}: {p.engine}</span></div>
@@ -424,6 +428,56 @@ export function VoiceSettings() {
       </div>
     </div>
   );
+}
+
+function VoiceLibrary() {
+  const { loading, error, data, reload } = useLoad(() => voiceLibrary.list(), []);
+  const [name, setName] = useState("");
+  const [file, setFile] = useState(null);
+  const [consent, setConsent] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [save, run] = useSave();
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
+  const perform = (operation, message) => run(async () => { await operation(); reload(); }, message);
+  return <section className="ad-box">
+    <h3>Consented voice library (English preview)</h3>
+    <p className="ad-muted">Recordings and speaker profiles are private to this tenant. OpenVoice V2 is a separate optional engine; Piper alone does not clone voices. Hindi and Telugu cloning are not enabled.</p>
+    {!data?.providerConfigured && <p role="status">Cloning provider is not configured. Uploads can be stored, but processing and activation are unavailable until a real provider generates a preview.</p>}
+    {loading && <Loading />}<Banner error={error} /><Status s={save} />
+    <form className="ad-form" onSubmit={(event) => {
+      event.preventDefault();
+      void perform(() => voiceLibrary.upload({ name, language: "en", consent }, file), "Private recording uploaded. Select Process to generate a speaker profile.");
+    }}>
+      <label>Voice name<input required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>Clean speech recording (6–120 seconds, max 20 MB)
+        <input required type="file" accept=".wav,.mp3,.m4a,.mp4" onChange={(event) => setFile(event.target.files[0] || null)} />
+      </label>
+      <label><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
+        I am the speaker or have explicit permission to create and use this synthetic voice.
+      </label>
+      <button disabled={!consent || !file || save.busy}>Upload private recording</button>
+    </form>
+    <button className="ad-quiet" onClick={reload}>Refresh processing status</button>
+    {previewUrl && <audio controls src={previewUrl} aria-label="Private voice preview" />}
+    {(data?.items || []).map((profile) => <div className="ad-box" key={profile.id}>
+      <b>{profile.name}</b> <span className="ad-pill">{profile.state}</span>
+      <p className="ad-muted">{profile.language} · {profile.provider} · {fmt(profile.createdAt)}</p>
+      {profile.error && <Banner error={profile.error} />}
+      <div className="ad-actions">
+        <button disabled={save.busy || !data.providerConfigured || ["processing", "active"].includes(profile.state)}
+          onClick={() => perform(() => voiceLibrary.process(profile.id), "Processing queued. Refresh status shortly.")}>Process / retry</button>
+        <button disabled={save.busy || !["ready", "active", "inactive"].includes(profile.state)} onClick={() => run(async () => {
+          const blob = await voiceLibrary.preview(profile.id, "Hello! I am your shopping assistant. How can I help you today?");
+          setPreviewUrl(URL.createObjectURL(blob));
+        }, "Preview generated. Listen before activation.")}>Generate preview</button>
+        <button disabled={save.busy || !["ready", "active", "inactive"].includes(profile.state)}
+          onClick={() => perform(() => voiceLibrary.activate(profile.id, profile.state !== "active"), profile.state === "active" ? "Voice deactivated." : "Voice activated.")}>
+          {profile.state === "active" ? "Deactivate" : "Activate after listening"}</button>
+        <button disabled={save.busy || ["active", "processing"].includes(profile.state)}
+          onClick={() => window.confirm("Permanently delete this private recording and speaker profile?") && perform(() => voiceLibrary.remove(profile.id), "Voice deleted.")}>Delete</button>
+      </div>
+    </div>)}
+  </section>;
 }
 
 export function Platform() {

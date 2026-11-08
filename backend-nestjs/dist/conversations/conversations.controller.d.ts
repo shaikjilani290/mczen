@@ -3,7 +3,9 @@ import { ConversationsService } from './conversations.service';
 export declare class ConversationsController {
     private readonly conversations;
     constructor(conversations: ConversationsService);
-    create(body: unknown, user: AuthenticatedUser): Promise<string>;
+    create(body: unknown, user: AuthenticatedUser): Promise<{
+        id: string;
+    }>;
     list(query: unknown, user: AuthenticatedUser): Promise<{
         items: {
             id: string;

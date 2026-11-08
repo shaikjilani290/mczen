@@ -19,9 +19,42 @@ let AgentInvocationAdapter = class AgentInvocationAdapter {
     }
     async invoke(question, context, signal) {
         signal.throwIfAborted();
-        const result = await this.agent.ask(question, context);
+        const result = await this.agent.ask(question, context, { signal });
         signal.throwIfAborted();
         return result;
+    }
+    async *stream(question, context, signal) {
+        signal.throwIfAborted();
+        const controller = new AbortController();
+        let notify = () => { };
+        const abort = () => { controller.abort(); notify(); };
+        signal.addEventListener('abort', abort, { once: true });
+        const queue = [];
+        const startedAt = performance.now();
+        let done = false;
+        let failure;
+        const pending = this.agent.ask(question, context, {
+            signal: controller.signal,
+            onText: text => { queue.push({ text }); notify(); },
+        }).then(response => { queue.push({ response, agentMs: performance.now() - startedAt }); }, error => { failure = error; })
+            .finally(() => { done = true; notify(); });
+        try {
+            while (!done || queue.length) {
+                signal.throwIfAborted();
+                const event = queue.shift();
+                if (event)
+                    yield event;
+                else
+                    await new Promise(resolve => { notify = resolve; });
+            }
+            if (failure)
+                throw failure;
+        }
+        finally {
+            controller.abort();
+            signal.removeEventListener('abort', abort);
+            void pending;
+        }
     }
 };
 exports.AgentInvocationAdapter = AgentInvocationAdapter;

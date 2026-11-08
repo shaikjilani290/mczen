@@ -24,7 +24,9 @@ export class ConversationsController {
   @Post()
   @RequirePermission('conversations:write')
   create(@Body() body: unknown, @CurrentUser() user: AuthenticatedUser) {
-    return this.conversations.create({ ...parseCreateConversation(body), userId: user.userId });
+    return this.conversations
+      .create({ ...parseCreateConversation(body), userId: user.userId })
+      .then((id) => ({ id }));
   }
 
   @Get()

@@ -55,9 +55,25 @@ export declare class WidgetPublicController {
         expiresAt: string;
         config: {
             name: string;
+            logoUrl: null;
+            primaryColor: string;
+            theme: string;
+            position: string;
+            buttonStyle: string;
+            welcomeMessage: null;
+            greeting: string | null;
+            languages: string[];
+            defaultLanguage: string;
+            voice: import("../voice/widget-voice.service").WidgetVoiceAvailability;
+        };
+    } | {
+        sessionToken: string;
+        expiresAt: string;
+        config: {
+            name: string;
             logoUrl: string | null;
             primaryColor: string;
-            theme: "auto" | "light" | "dark";
+            theme: "light" | "dark" | "auto";
             position: "bottom-right" | "bottom-left";
             buttonStyle: "round" | "pill" | "square";
             welcomeMessage: string | null;
@@ -68,6 +84,9 @@ export declare class WidgetPublicController {
         };
     }>;
     message(body: unknown, authorization: string | undefined, origin: string | undefined): Promise<{
+        sessionToken: string;
+        expiresAt: string;
+        products?: import("../agent/agent.service").AgentProductCard[] | undefined;
         success: boolean;
         answer: string;
         sources: {
@@ -75,8 +94,6 @@ export declare class WidgetPublicController {
             title: string;
             source: string;
         }[];
-        sessionToken: string;
-        expiresAt: string;
     }>;
     voiceTicket(authorization: string | undefined, origin: string | undefined): Promise<{
         ticket: string;

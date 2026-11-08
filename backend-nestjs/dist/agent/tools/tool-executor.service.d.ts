@@ -12,6 +12,7 @@ export declare class ToolExecutorService {
     private readonly permissions;
     private readonly validation;
     private readonly audit;
+    private readonly logger;
     constructor(toolRegistry: ToolRegistryService, permissions: ToolPermissionService, validation: ToolValidationService, audit: ToolAuditService);
     execute(toolName: unknown, input: unknown, context: AgentExecutionContext, signal?: AbortSignal, options?: ToolExecutionOptions): Promise<ToolExecutionResult>;
     private runHandler;

@@ -58,7 +58,16 @@ function expectCompatibleResponse(response: AgentResponse) {
 type SentRequest = {
   model: string;
   stream: boolean;
-  messages: Array<{ role: string; content: string; tool_name?: string; tool_calls?: unknown[] }>;
+  temperature?: number;
+  max_tokens?: number;
+  tool_choice?: string;
+  messages: Array<{
+    role: string;
+    content: string;
+    tool_name?: string;
+    tool_call_id?: string;
+    tool_calls?: Array<{ id?: string; function: { name: string; arguments: string } }>;
+  }>;
   tools?: Array<{ function: { name: string; parameters: unknown } }>;
 };
 
@@ -98,6 +107,73 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     }));
   }
 
+  it('lets merchant product questions reach catalogue tools without a general-knowledge prerequisite', async () => {
+    registry.register(testTool({
+      name: 'search_products', requiredPermissions: ['products:read'],
+      handler: async () => [],
+    }));
+    queueAssistant('No matching imported products were found.');
+    const result = await service.ask('Show me your best products', {
+      ...contextFor(), channel: 'widget',
+    });
+    expect(result.success).toBe(true);
+    expect(result.toolCalls).toEqual([{ name: 'search_products', resultCount: 0 }]);
+    expect(executeSpy.mock.calls.some(([name]) => name === 'knowledge_search')).toBe(false);
+    expect(sentRequest(0).messages[0].content).toContain('cannot add products to a cart');
+  });
+
+  it('grounds merchant budget answers in an audited currency-qualified search before the model runs', async () => {
+    registry.register(testTool({
+      name: 'search_products', requiredPermissions: ['products:read'],
+      inputSchema: { type: 'object', required: ['maxPrice', 'currency'], properties: {
+        maxPrice: { type: 'number', description: 'Price ceiling.' }, currency: { type: 'string', description: 'ISO currency.' },
+      }, additionalProperties: false },
+      handler: async (args) => ({ products: [], appliedFilters: args }),
+    }));
+    queueAssistant('No matching imported products.');
+    await service.ask('Find products under ₹2,000.', { ...contextFor(), channel: 'widget' });
+    expect(executeSpy).toHaveBeenCalledWith('search_products', { maxPrice: 2000, currency: 'INR' }, expect.objectContaining({ channel: 'widget' }), undefined, undefined);
+    expect(sentRequest(0).messages.at(-1)).toMatchObject({ role: 'tool', tool_name: 'search_products' });
+    expect(sentRequest(0).messages.at(-1)?.content).toContain('"currency":"INR"');
+  });
+
+  it('returns source references from the actual website tool, not model-generated URLs', async () => {
+    registry.register(testTool({
+      name: 'search_website_content', requiredPermissions: ['knowledge:read'],
+      inputSchema: { type: 'object', required: ['query'], properties: { query: { type: 'string', description: 'Search query.' } }, additionalProperties: false },
+      handler: async () => ({ pages: [{ url: 'https://merchant.example/returns', title: 'Returns', excerpt: 'Contact the merchant.' }] }),
+    }));
+    queueAssistant('Contact the merchant as described in Returns.');
+    const result = await service.ask('What is the return policy?', { ...contextFor(), channel: 'widget' });
+    expect(result.sources).toEqual([{ id: 'https://merchant.example/returns', title: 'Returns', source: 'https://merchant.example/returns' }]);
+  });
+
+  it('does not bypass product permissions for backend-controlled merchant retrieval', async () => {
+    const handler = jest.fn(async () => []);
+    registry.register(testTool({ name: 'search_products', requiredPermissions: ['products:read'], handler }));
+    queueAssistant('Product access is unavailable.');
+    const result = await service.ask('What products are available?', { ...contextFor('tenant-a', []), channel: 'widget' });
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.toolCalls).toEqual([]);
+    expect(sentRequest(0).messages.at(-1)?.content).toContain('error');
+  });
+
+  it('uses completed merchant evidence for a concise voice answer instead of repeating catalogue tools', async () => {
+    registry.register(testTool({
+      name: 'search_products', requiredPermissions: ['products:read'],
+      handler: async () => ({ products: [{ name: 'Fixture product', externalProductId: 'fixture', price: 10,
+        salePrice: null, currency: 'INR', productUrl: 'https://merchant.example/product', images: [] }] }),
+    }));
+    const result = await service.ask('What products are available?', { ...contextFor(), channel: 'widget', modality: 'voice' });
+    expect(result.success).toBe(true);
+    expect(result.toolCalls).toEqual([{ name: 'search_products', resultCount: 1 }]);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.model).toBe('verified-catalogue');
+    expect(result.answer).toContain('Fixture product: 10 Indian rupees');
+    expect(result.answer).not.toContain('https://');
+  });
+
   function queueAssistant(content: unknown, calls?: unknown) {
     queueResponse({
       model: 'qwen2.5:3b',
@@ -105,6 +181,27 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
         role: 'assistant', content,
         ...(calls !== undefined ? { tool_calls: calls } : {}),
       },
+    });
+  }
+
+  function useOpenAICompatibleProvider() {
+    const values = readAgentRuntimeConfig({
+      LLM_PROVIDER: 'openai-compatible',
+      LLM_BASE_URL: 'http://127.0.0.1:21434/v1',
+      LLM_MODEL: 'Qwen2.5-3B-Instruct',
+    });
+    service = new AgentService(registry, executor, { values } as AgentRuntimeConfigService, new ToolPermissionService());
+  }
+
+  function queueCompatibleAssistant(content: string | null, calls?: unknown[]) {
+    queueResponse({
+      choices: [{
+        message: {
+          role: 'assistant',
+          content,
+          ...(calls !== undefined ? { tool_calls: calls } : {}),
+        },
+      }],
     });
   }
 
@@ -117,6 +214,195 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
       .filter((message) => message.role === 'tool')
       .map((message) => JSON.parse(message.content) as Record<string, unknown>);
   }
+
+  it('uses configured OpenAI-compatible URL, model, bounded request options, and response model', async () => {
+    useOpenAICompatibleProvider();
+    queueCompatibleAssistant('Hello from the GPU provider.');
+
+    const result = await service.ask('hello', contextFor());
+    const request = sentRequest(0);
+
+    expect(result).toMatchObject({
+      success: true,
+      answer: 'Hello from the GPU provider.',
+      model: 'Qwen2.5-3B-Instruct',
+    });
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:21434/v1/chat/completions');
+    expect(request).toMatchObject({
+      model: 'Qwen2.5-3B-Instruct',
+      stream: false,
+      temperature: 0.2,
+      max_tokens: 2048,
+      tool_choice: 'auto',
+    });
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('authorization')).toBe(false);
+  });
+
+  it('executes a successful OpenAI-compatible tool call and preserves its provider ID', async () => {
+    useOpenAICompatibleProvider();
+    registry.register(testTool({ name: 'runtime_test_tool' }));
+    queueCompatibleAssistant(null, [{
+      id: 'call_123',
+      type: 'function',
+      function: { name: 'runtime_test_tool', arguments: '{"value":1}' },
+    }]);
+    queueCompatibleAssistant('The lookup succeeded.');
+
+    const result = await service.ask('hello', contextFor());
+    const messages = sentRequest(1).messages;
+    const assistant = messages.find((message) => message.role === 'assistant' && message.tool_calls);
+    const tool = messages.find((message) => message.role === 'tool');
+
+    expect(result.success).toBe(true);
+    expect(executeSpy).toHaveBeenCalledWith(
+      'runtime_test_tool', { value: 1 }, expect.objectContaining({ tenantId: 'tenant-a' }),
+      undefined, { allowedToolNames: expect.any(Set) },
+    );
+    expect(assistant?.tool_calls).toEqual([expect.objectContaining({ id: 'call_123' })]);
+    expect(tool).toMatchObject({ role: 'tool', tool_call_id: 'call_123' });
+  });
+
+  it('preserves order and IDs for multiple OpenAI-compatible tool calls', async () => {
+    useOpenAICompatibleProvider();
+    const executionOrder: string[] = [];
+    registry.register(testTool({
+      name: 'first_tool',
+      handler: async () => { executionOrder.push('first'); return { order: 1 }; },
+    }));
+    registry.register(testTool({
+      name: 'second_tool',
+      handler: async () => { executionOrder.push('second'); return { order: 2 }; },
+    }));
+    queueCompatibleAssistant(null, [
+      { id: 'call_first', type: 'function', function: { name: 'first_tool', arguments: '{}' } },
+      { id: 'call_second', type: 'function', function: { name: 'second_tool', arguments: '{}' } },
+    ]);
+    queueCompatibleAssistant('Both tools completed.');
+
+    const result = await service.ask('hello', contextFor());
+    const messages = sentRequest(1).messages;
+    const assistant = messages.find((message) => message.role === 'assistant' && message.tool_calls);
+    const toolResultsInOrder = messages.filter((message) => message.role === 'tool');
+
+    expect(result.success).toBe(true);
+    expect(executionOrder).toEqual(['first', 'second']);
+    expect(assistant?.tool_calls?.map((call) => call.id)).toEqual(['call_first', 'call_second']);
+    expect(toolResultsInOrder.map((message) => message.tool_call_id)).toEqual(['call_first', 'call_second']);
+    expect(JSON.parse(toolResultsInOrder[0].content)).toEqual({ order: 1 });
+    expect(JSON.parse(toolResultsInOrder[1].content)).toEqual({ order: 2 });
+  });
+
+  it('generates a deterministic ID for an OpenAI-compatible tool call that omits one', async () => {
+    useOpenAICompatibleProvider();
+    registry.register(testTool());
+    queueCompatibleAssistant(null, [{
+      type: 'function',
+      function: { name: 'runtime_test_tool', arguments: '{}' },
+    }]);
+    queueCompatibleAssistant('The lookup succeeded.');
+
+    await service.ask('hello', contextFor());
+    const messages = sentRequest(1).messages;
+    const assistant = messages.find((message) => message.role === 'assistant' && message.tool_calls);
+    const tool = messages.find((message) => message.role === 'tool');
+
+    expect(assistant?.tool_calls?.[0].id).toBe('mczen_call_0_0');
+    expect(tool?.tool_call_id).toBe('mczen_call_0_0');
+  });
+
+  it('returns failed OpenAI-compatible tool execution by its original tool-call ID', async () => {
+    useOpenAICompatibleProvider();
+    registry.register(testTool({ handler: async () => { throw new Error('private tool failure'); } }));
+    queueCompatibleAssistant(null, [{
+      id: 'call_failed',
+      type: 'function',
+      function: { name: 'runtime_test_tool', arguments: '{}' },
+    }]);
+    queueCompatibleAssistant('The tool could not complete.');
+
+    await service.ask('hello', contextFor());
+    const tool = sentRequest(1).messages.find((message) => message.role === 'tool');
+    expect(tool?.tool_call_id).toBe('call_failed');
+    expect(JSON.parse(tool!.content)).toMatchObject({ error: { code: 'EXECUTION_ERROR' } });
+  });
+
+  it('returns an invalid OpenAI-compatible tool result safely and keeps its ID paired', async () => {
+    useOpenAICompatibleProvider();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    registry.register(testTool({ handler: async () => circular }));
+    queueCompatibleAssistant(null, [{
+      id: 'call_invalid_result',
+      type: 'function',
+      function: { name: 'runtime_test_tool', arguments: '{}' },
+    }]);
+    queueCompatibleAssistant('The tool result was invalid.');
+
+    const result = await service.ask('hello', contextFor());
+    const tool = sentRequest(1).messages.find((message) => message.role === 'tool');
+    expect(result.toolCalls).toEqual([]);
+    expect(tool?.tool_call_id).toBe('call_invalid_result');
+    expect(JSON.parse(tool!.content)).toMatchObject({ error: { code: 'EXECUTION_ERROR' } });
+    expect(tool!.content).not.toContain('self');
+  });
+
+  it.each([
+    null,
+    {},
+    { choices: [] },
+    { choices: [{ message: { role: 'system', content: 'untrusted' } }] },
+    { choices: [{ message: { role: 'assistant', content: 3 } }] },
+    { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{}] } }] },
+    { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ type: 'function', function: { name: 'runtime_test_tool', arguments: '{' } }] } }] },
+    { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'duplicate', type: 'function', function: { name: 'runtime_test_tool', arguments: '{}' } }, { id: 'duplicate', type: 'function', function: { name: 'runtime_test_tool', arguments: '{}' } }] } }] },
+  ])('rejects malformed OpenAI-compatible response safely: %p', async (data) => {
+    useOpenAICompatibleProvider();
+    queueResponse(data);
+
+    const result = await service.ask('hello', contextFor());
+
+    expect(result.success).toBe(false);
+    expect(result.answer).toContain('invalid response');
+    expect(executeSpy).not.toHaveBeenCalled();
+    expectCompatibleResponse(result);
+  });
+
+  it('times out OpenAI-compatible requests and aborts them', async () => {
+    useOpenAICompatibleProvider();
+    jest.useFakeTimers();
+    fetchMock.mockImplementationOnce(() => new Promise(() => undefined));
+
+    const pending = service.ask('hello', contextFor());
+    await jest.advanceTimersByTimeAsync(120_000);
+    const result = await pending;
+
+    expect(result.success).toBe(false);
+    expect(result.answer).toContain('too long');
+    expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(jest.getTimerCount()).toBe(0);
+    expectCompatibleResponse(result);
+  });
+
+  it('pairs the initial merchant catalogue lookup before asking OpenAI-compatible model', async () => {
+    useOpenAICompatibleProvider();
+    registry.register(testTool({
+      name: 'search_products',
+      requiredPermissions: ['products:read'],
+      handler: async () => [],
+    }));
+    queueCompatibleAssistant('No products were found.');
+
+    await service.ask('Show me products.', { ...contextFor(), channel: 'widget' });
+    const messages = sentRequest(0).messages;
+    const assistant = messages.find((message) => message.role === 'assistant' && message.tool_calls);
+    const tool = messages.find((message) => message.role === 'tool');
+
+    expect(assistant?.tool_calls?.[0]).toMatchObject({
+      id: 'mczen_initial_0',
+      function: { name: 'search_products', arguments: '{}' },
+    });
+    expect(tool).toMatchObject({ role: 'tool', tool_call_id: 'mczen_initial_0' });
+  });
 
   it('answers a normal conversation without executing a tool', async () => {
     queueAssistant('  Hello! How can I help?  ');
@@ -183,6 +469,46 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     expectCompatibleResponse(result);
   });
 
+  it('returns only safe website product facts for widget cards from product-tool results', async () => {
+    registry.register(testTool({
+      name: 'search_products',
+      description: 'Search imported website products.',
+      category: 'products',
+      requiredPermissions: ['products:read'],
+      inputSchema: { type: 'object', required: [], properties: {}, additionalProperties: false },
+    }));
+    executeSpy.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        products: [
+          {
+            externalProductId: 'merchant-1', name: 'Merchant Tea',
+            productUrl: 'https://shop.example/products/tea', images: ['https://shop.example/tea.jpg'],
+            price: 2500, salePrice: 1800, currency: 'INR', stock: 5,
+          },
+          {
+            externalProductId: 'bad-link', name: 'Bad link',
+            productUrl: 'javascript:alert(1)', images: ['javascript:alert(1)'],
+            price: 1, currency: 'INR',
+          },
+        ],
+      },
+    });
+    queueAssistant('', [toolCall('search_products', { query: 'tea' })]);
+    queueAssistant('Merchant Tea costs ₹1,800.');
+    const result = await service.ask('Find tea', contextFor());
+
+    expect(result.products).toEqual([{
+      externalProductId: 'merchant-1',
+      name: 'Merchant Tea',
+      productUrl: 'https://shop.example/products/tea',
+      images: ['https://shop.example/tea.jpg'],
+      price: 2500,
+      salePrice: 1800,
+      currency: 'INR',
+    }]);
+  });
+
   it('processes multiple tool calls in one round and correlates each tool response', async () => {
     queueAssistant('', [
       toolCall('get_products', { limit: 2 }),
@@ -197,10 +523,14 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
       'get_products', 'get_product_details', 'check_inventory',
     ]);
     expect(executeSpy).toHaveBeenCalledTimes(3);
-    expect(sentRequest(1).messages.filter((message) => message.role === 'tool')
-      .map((message) => message.tool_name)).toEqual([
+    const roundMessages = sentRequest(1).messages;
+    const assistantCalls = roundMessages.find((message) => message.role === 'assistant' && message.tool_calls)?.tool_calls;
+    const toolMessages = roundMessages.filter((message) => message.role === 'tool');
+    expect(toolMessages.map((message) => message.tool_name)).toEqual([
       'get_products', 'get_product_details', 'check_inventory',
     ]);
+    expect(assistantCalls?.every((call) => call.id === undefined)).toBe(true);
+    expect(toolMessages.every((message) => message.tool_call_id === undefined)).toBe(true);
     expect(toolResults()[2]).toMatchObject({ quantity: 42, demonstrationData: true });
   });
 

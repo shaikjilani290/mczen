@@ -50,7 +50,7 @@ export const voiceApi = {
   conversations: (token) =>
     request("/api/conversations", {
       token,
-      query: { page: 1, pageSize: 50, sortBy: "updatedAt", sortOrder: "desc" },
+      query: { page: 1, pageSize: 50, status: "open", sortBy: "updatedAt", sortOrder: "desc" },
     }),
   createConversation: (token, assistantId, language) =>
     request("/api/conversations", {

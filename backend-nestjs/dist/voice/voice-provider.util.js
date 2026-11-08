@@ -28,22 +28,27 @@ function readLoopbackUrl(name, defaultValue) {
     }
     return url;
 }
-async function fetchWithTimeout(input, init, timeoutMs) {
+async function fetchWithTimeout(input, init, timeoutMs, readResponse) {
     const controller = new AbortController();
     const parentSignal = init.signal;
     const onAbort = () => controller.abort();
     parentSignal?.addEventListener('abort', onAbort, { once: true });
+    if (parentSignal?.aborted)
+        controller.abort();
     let timedOut = false;
     const timer = setTimeout(() => {
         timedOut = true;
         controller.abort();
     }, timeoutMs);
     try {
-        return await fetch(input, { ...init, signal: controller.signal });
+        const response = await fetch(input, { ...init, signal: controller.signal });
+        return readResponse ? await readResponse(response) : response;
     }
-    catch {
+    catch (error) {
         if (parentSignal?.aborted || timedOut)
             throw new VoiceProviderError('VOICE_PROVIDER_TIMEOUT');
+        if (error instanceof VoiceProviderError)
+            throw error;
         throw new VoiceProviderError('VOICE_ENGINE_UNAVAILABLE');
     }
     finally {
@@ -60,8 +65,8 @@ class Semaphore {
         this.maxActive = maxActive;
         this.maxQueued = maxQueued;
     }
-    async run(operation) {
-        const release = await this.acquire();
+    async run(operation, signal) {
+        const release = await this.acquire(signal);
         try {
             return await operation();
         }

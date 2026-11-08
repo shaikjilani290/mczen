@@ -8,5 +8,7 @@ export declare class PiperAdapter implements TextToSpeechPort {
     supportsVoice(language: VoiceLanguage, voice: string): boolean;
     voices(language: VoiceLanguage): readonly TtsVoiceOption[];
     synthesize(request: TtsRequest): AsyncIterable<TtsAudioChunk>;
+    private synthesizeSegment;
+    private readChunk;
     healthCheck(): Promise<boolean>;
 }

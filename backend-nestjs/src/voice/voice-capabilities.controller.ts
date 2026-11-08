@@ -27,7 +27,7 @@ export class VoiceCapabilitiesController {
     return {
       protocol: 'mczen-voice.v1',
       providers: {
-        stt: { engine: this.stt.engineId, healthy: stt },
+        stt: { engine: this.stt.engineId, healthy: stt, ...this.stt.status?.() },
         tts: { engine: this.tts.engineId, healthy: tts },
         vad: { engine: this.vad.engineId, healthy: vad },
       },

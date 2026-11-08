@@ -21,11 +21,13 @@ export declare function parseWidgetSettingsUpdate(body: unknown): WidgetSettings
 export declare function isPublicKey(value: unknown): value is string;
 export declare function parsePublicSession(body: unknown): {
     publicKey: string;
+    assistantId?: string;
     language?: WidgetLanguage;
 };
 export declare function parsePublicMessage(body: unknown): {
     message: string;
     language?: WidgetLanguage;
+    requestId?: string;
 };
 export interface DateRange {
     from: Date;

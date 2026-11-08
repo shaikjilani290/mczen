@@ -20,12 +20,13 @@ const knowledge_module_1 = require("./knowledge/knowledge.module");
 const voice_module_1 = require("./voice/voice.module");
 const widget_module_1 = require("./widget/widget.module");
 const shared_state_module_1 = require("./shared-state/shared-state.module");
+const website_integrations_module_1 = require("./website-integrations/website-integrations.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
 exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
-        imports: [shared_state_module_1.SharedStateModule, audit_module_1.AuditModule, database_module_1.DatabaseModule.forRoot(), agent_module_1.AgentModule, auth_module_1.AuthModule, assistants_module_1.AssistantsModule, knowledge_module_1.KnowledgeModule, voice_module_1.VoiceModule, widget_module_1.WidgetModule],
+        imports: [shared_state_module_1.SharedStateModule, audit_module_1.AuditModule, database_module_1.DatabaseModule.forRoot(), agent_module_1.AgentModule, auth_module_1.AuthModule, assistants_module_1.AssistantsModule, knowledge_module_1.KnowledgeModule, voice_module_1.VoiceModule, widget_module_1.WidgetModule, website_integrations_module_1.WebsiteIntegrationsModule],
         controllers: [app_controller_1.AppController, readiness_controller_1.ReadinessController],
         providers: [app_service_1.AppService],
     })

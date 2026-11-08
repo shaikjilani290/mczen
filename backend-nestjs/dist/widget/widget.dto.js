@@ -116,19 +116,32 @@ function isPublicKey(value) {
     return typeof value === 'string' && PUBLIC_KEY.test(value);
 }
 function parsePublicSession(body) {
-    const input = record(body, ['publicKey', 'language']);
-    if (!isPublicKey(input.publicKey))
+    const input = record(body, ['publicKey', 'assistantId', 'language']);
+    const publicKey = input.publicKey;
+    const widgetKey = isPublicKey(publicKey);
+    const integrationKey = typeof publicKey === 'string' && /^mzp_[A-Za-z0-9_-]{43}$/.test(publicKey);
+    if (!widgetKey && !integrationKey)
         throw new common_1.BadRequestException('The widget key is invalid.');
+    if (input.assistantId !== undefined && (typeof input.assistantId !== 'string' || !(0, uuid_1.isUuidv7)(input.assistantId))) {
+        throw new common_1.BadRequestException('assistantId is invalid.');
+    }
+    if (input.assistantId !== undefined && !integrationKey)
+        throw new common_1.BadRequestException('assistantId is only valid for a website integration.');
     return {
-        publicKey: input.publicKey,
+        publicKey: publicKey,
+        ...(input.assistantId ? { assistantId: input.assistantId } : {}),
         ...(input.language !== undefined ? { language: oneOf(input.language, exports.WIDGET_LANGUAGES, 'language') } : {}),
     };
 }
 function parsePublicMessage(body) {
-    const input = record(body, ['message', 'language']);
+    const input = record(body, ['message', 'language', 'requestId']);
+    if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-zA-Z0-9-]{16,128}$/.test(input.requestId))) {
+        throw new common_1.BadRequestException('requestId is invalid.');
+    }
     return {
         message: text(input.message, 'message', 1, 2000),
         ...(input.language !== undefined ? { language: oneOf(input.language, exports.WIDGET_LANGUAGES, 'language') } : {}),
+        ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
     };
 }
 function parseDateRange(query, now = new Date()) {

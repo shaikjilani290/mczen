@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import {
   type AgentExecutionContext,
@@ -43,6 +43,7 @@ export interface ToolExecutionOptions {
  */
 @Injectable()
 export class ToolExecutorService {
+  private readonly logger = new Logger(ToolExecutorService.name);
   constructor(
     private readonly toolRegistry: ToolRegistryService,
     private readonly permissions: ToolPermissionService,
@@ -84,6 +85,10 @@ export class ToolExecutorService {
       errorCode: ToolErrorCode | null,
       resultSummary?: Record<string, number | boolean>,
     ): Promise<void> => {
+      if (context.modality === 'voice') this.logger.log({
+        event: 'voice_tool_timing', requestId: context.requestId, toolName: name ?? 'invalid_tool',
+        durationMs: Date.now() - startedAt, outcome, errorCode,
+      });
       await this.audit.record({
         tenantId: context.tenantId,
         toolName: name ?? 'invalid_tool',

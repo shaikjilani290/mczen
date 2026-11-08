@@ -1,6 +1,12 @@
+
 import { Injectable } from '@nestjs/common';
 
+export type LlmProvider = 'ollama' | 'openai-compatible';
+
 export interface AgentRuntimeConfig {
+  readonly llmProvider: LlmProvider;
+  readonly llmBaseUrl: string;
+  readonly llmModel: string;
   readonly ollamaBaseUrl: string;
   readonly ollamaModel: string;
   readonly ollamaTimeoutMs: number;
@@ -39,22 +45,18 @@ function integerSetting(
   return value;
 }
 
-/** Only these five settings are read; the environment is never sent to Ollama. */
-export function readAgentRuntimeConfig(
-  env: NodeJS.ProcessEnv,
-): Readonly<AgentRuntimeConfig> {
-  const baseUrl = env['OLLAMA_BASE_URL'] ?? 'http://127.0.0.1:11434';
+function validatedBaseUrl(raw: string, settingName: string): string {
   let parsedUrl: URL;
 
   try {
-    parsedUrl = new URL(baseUrl);
+    parsedUrl = new URL(raw);
   } catch {
-    return invalidSetting('OLLAMA_BASE_URL');
+    return invalidSetting(settingName);
   }
 
   if (
-    baseUrl.length > 2048 ||
-    baseUrl !== baseUrl.trim() ||
+    raw.length > 2048 ||
+    raw !== raw.trim() ||
     !['http:', 'https:'].includes(parsedUrl.protocol) ||
     !parsedUrl.hostname ||
     parsedUrl.username ||
@@ -62,18 +64,52 @@ export function readAgentRuntimeConfig(
     parsedUrl.search ||
     parsedUrl.hash
   ) {
-    return invalidSetting('OLLAMA_BASE_URL');
+    return invalidSetting(settingName);
   }
 
-  const model = env['OLLAMA_MODEL'] ?? 'qwen2.5:3b';
+  return parsedUrl.href.replace(/\/+$/, '');
+}
 
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model)) {
+/** Only explicitly supported settings are read. */
+export function readAgentRuntimeConfig(
+  env: NodeJS.ProcessEnv,
+): Readonly<AgentRuntimeConfig> {
+  const provider = env['LLM_PROVIDER'] ?? 'ollama';
+
+  if (provider !== 'ollama' && provider !== 'openai-compatible') {
+    return invalidSetting('LLM_PROVIDER');
+  }
+
+  // Existing Ollama configuration remains supported.
+  const ollamaBaseUrl = validatedBaseUrl(
+    env['OLLAMA_BASE_URL'] ?? 'http://127.0.0.1:11434',
+    'OLLAMA_BASE_URL',
+  );
+
+  const ollamaModel = env['OLLAMA_MODEL'] ?? 'qwen2.5:3b';
+
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(ollamaModel)) {
     return invalidSetting('OLLAMA_MODEL');
   }
 
+  // New OpenAI-compatible provider configuration.
+  const llmBaseUrl = validatedBaseUrl(
+    env['LLM_BASE_URL'] ?? 'http://127.0.0.1:21434/v1',
+    'LLM_BASE_URL',
+  );
+
+  const llmModel = env['LLM_MODEL'] ?? 'Qwen2.5-3B-Instruct';
+
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(llmModel)) {
+    return invalidSetting('LLM_MODEL');
+  }
+
   return Object.freeze({
-    ollamaBaseUrl: parsedUrl.href.replace(/\/+$/, ''),
-    ollamaModel: model,
+    llmProvider: provider,
+    llmBaseUrl,
+    llmModel,
+    ollamaBaseUrl,
+    ollamaModel,
     ollamaTimeoutMs: integerSetting(
       env,
       'OLLAMA_TIMEOUT_MS',
@@ -81,7 +117,6 @@ export function readAgentRuntimeConfig(
       1_000,
       300_000,
     ),
-    // Environment settings may reduce, but never raise, the existing ceilings.
     maxRounds: integerSetting(env, 'AGENT_MAX_ROUNDS', 4, 1, 4),
     maxToolCalls: integerSetting(env, 'AGENT_MAX_TOOL_CALLS', 5, 1, 5),
   });

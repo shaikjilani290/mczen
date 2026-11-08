@@ -26,32 +26,47 @@ function integerSetting(env, name, fallback, minimum, maximum) {
     }
     return value;
 }
-function readAgentRuntimeConfig(env) {
-    const baseUrl = env['OLLAMA_BASE_URL'] ?? 'http://127.0.0.1:11434';
+function validatedBaseUrl(raw, settingName) {
     let parsedUrl;
     try {
-        parsedUrl = new URL(baseUrl);
+        parsedUrl = new URL(raw);
     }
     catch {
-        return invalidSetting('OLLAMA_BASE_URL');
+        return invalidSetting(settingName);
     }
-    if (baseUrl.length > 2048 ||
-        baseUrl !== baseUrl.trim() ||
+    if (raw.length > 2048 ||
+        raw !== raw.trim() ||
         !['http:', 'https:'].includes(parsedUrl.protocol) ||
         !parsedUrl.hostname ||
         parsedUrl.username ||
         parsedUrl.password ||
         parsedUrl.search ||
         parsedUrl.hash) {
-        return invalidSetting('OLLAMA_BASE_URL');
+        return invalidSetting(settingName);
     }
-    const model = env['OLLAMA_MODEL'] ?? 'qwen2.5:3b';
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model)) {
+    return parsedUrl.href.replace(/\/+$/, '');
+}
+function readAgentRuntimeConfig(env) {
+    const provider = env['LLM_PROVIDER'] ?? 'ollama';
+    if (provider !== 'ollama' && provider !== 'openai-compatible') {
+        return invalidSetting('LLM_PROVIDER');
+    }
+    const ollamaBaseUrl = validatedBaseUrl(env['OLLAMA_BASE_URL'] ?? 'http://127.0.0.1:11434', 'OLLAMA_BASE_URL');
+    const ollamaModel = env['OLLAMA_MODEL'] ?? 'qwen2.5:3b';
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(ollamaModel)) {
         return invalidSetting('OLLAMA_MODEL');
     }
+    const llmBaseUrl = validatedBaseUrl(env['LLM_BASE_URL'] ?? 'http://127.0.0.1:21434/v1', 'LLM_BASE_URL');
+    const llmModel = env['LLM_MODEL'] ?? 'Qwen2.5-3B-Instruct';
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(llmModel)) {
+        return invalidSetting('LLM_MODEL');
+    }
     return Object.freeze({
-        ollamaBaseUrl: parsedUrl.href.replace(/\/+$/, ''),
-        ollamaModel: model,
+        llmProvider: provider,
+        llmBaseUrl,
+        llmModel,
+        ollamaBaseUrl,
+        ollamaModel,
         ollamaTimeoutMs: integerSetting(env, 'OLLAMA_TIMEOUT_MS', 120_000, 1_000, 300_000),
         maxRounds: integerSetting(env, 'AGENT_MAX_ROUNDS', 4, 1, 4),
         maxToolCalls: integerSetting(env, 'AGENT_MAX_TOOL_CALLS', 5, 1, 5),

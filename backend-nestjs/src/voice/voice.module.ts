@@ -5,6 +5,7 @@ import { ConversationsModule } from '../conversations/conversations.module';
 import { AgentInvocationAdapter } from './agent-invocation.adapter';
 import { AGENT_INVOCATION } from './agent-invocation.port';
 import { FasterWhisperAdapter } from './stt/faster-whisper.adapter';
+import { ConfiguredSttAdapter } from './stt/configured-stt.adapter';
 import { SPEECH_TO_TEXT } from './stt/stt.port';
 import { SileroVadAdapter } from './vad/silero-vad.adapter';
 import { VOICE_ACTIVITY } from './vad/vad.port';
@@ -18,12 +19,16 @@ import { VoiceTicketController } from './voice-ticket.controller';
 import { VoiceCapabilitiesController } from './voice-capabilities.controller';
 import { VoiceTicketService } from './voice-ticket.service';
 import { WidgetVoiceService } from './widget-voice.service';
+import { VoiceLibraryService } from './voice-library.service';
+import { VoiceLibraryController } from './voice-library.controller';
+import { WebsiteDataModule } from '../website-integrations/website-data.module';
 
 @Module({
-  imports: [AgentModule, AuthModule, ConversationsModule],
-  controllers: [VoiceTicketController, VoiceCapabilitiesController],
+  imports: [AgentModule, AuthModule, ConversationsModule, WebsiteDataModule],
+  controllers: [VoiceTicketController, VoiceCapabilitiesController, VoiceLibraryController],
   exports: [WidgetVoiceService],
   providers: [
+    VoiceLibraryService,
     WidgetVoiceService,
     VoiceAuthService,
     VoiceSessionRepository,
@@ -31,10 +36,11 @@ import { WidgetVoiceService } from './widget-voice.service';
     VoiceSessionManager,
     VoiceGateway,
     FasterWhisperAdapter,
+    ConfiguredSttAdapter,
     SileroVadAdapter,
     PiperAdapter,
     AgentInvocationAdapter,
-    { provide: SPEECH_TO_TEXT, useExisting: FasterWhisperAdapter },
+    { provide: SPEECH_TO_TEXT, useExisting: ConfiguredSttAdapter },
     { provide: VOICE_ACTIVITY, useExisting: SileroVadAdapter },
     { provide: TEXT_TO_SPEECH, useExisting: PiperAdapter },
     { provide: AGENT_INVOCATION, useExisting: AgentInvocationAdapter },

@@ -32,6 +32,7 @@ export interface VerifiedVoiceContext {
     settings: VoiceSettings;
 }
 export interface VoiceSession {
+    audioDiagnostics?: import('./audio-diagnostics').PcmDiagnostics;
     readonly id: string;
     readonly context: VerifiedVoiceContext;
     socket?: WebSocket;
@@ -43,7 +44,14 @@ export interface VoiceSession {
     audioBytes: number;
     currentAudio: Buffer[];
     preRoll: Buffer[];
-    audioQueue: Buffer[];
+    audioQueue: Array<{
+        payload: Buffer;
+        epoch: number;
+        sequence: number;
+        receivedAt: number;
+    }>;
+    flowPaused?: boolean;
+    vadMs?: number;
     audioProcessing: boolean;
     currentAudioBytes: number;
     pendingAudioBytes: number;
@@ -60,12 +68,22 @@ export interface VoiceSession {
     speakMs: number;
     speakingStartedAt?: number;
     utteranceStartedAt?: number;
+    timing?: {
+        turnId: string;
+        startedAt: number;
+        preRollMs?: number;
+        endpointAt?: number;
+        sttMs?: number;
+        sttProcessingMs?: number;
+        agentMs?: number;
+    };
     lastActivityAt: number;
     turnId?: string;
     turnAbort?: AbortController;
     ttsAbort?: AbortController;
     sttAbort?: AbortController;
     partialAbort?: AbortController;
+    vadAbort?: AbortController;
     resumeTokenHash?: string;
     slotTimer?: ReturnType<typeof setInterval>;
     slotScopes?: readonly string[];

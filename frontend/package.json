@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": {"dev":"vite --host 0.0.0.0","build":"vite build && vite build --config vite.widget.config.js","build:widget":"vite build --config vite.widget.config.js","test":"node --test src/widget/client.test.js src/voice/voiceClient.test.js src/widget/voice.test.js","preview":"vite preview --host 0.0.0.0"},
+  "scripts": {"dev":"vite --host 0.0.0.0","build":"vite build && vite build --config vite.widget.config.js && vite build --config vite.sdk.config.js","build:widget":"vite build --config vite.widget.config.js && vite build --config vite.sdk.config.js","test":"node --test src/widget/client.test.js src/voice/voiceClient.test.js src/widget/voice.test.js","preview":"vite preview --host 0.0.0.0"},
   "dependencies": {"lucide-react":"^0.468.0","react":"^18.3.1","react-dom":"^18.3.1"},
   "devDependencies": {"@vitejs/plugin-react":"^4.3.4","vite":"^6.0.7"}
 }

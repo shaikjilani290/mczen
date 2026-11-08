@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.widgetCorsOptions = exports.WIDGET_PUBLIC_PATH = exports.CorsConfigError = void 0;
+exports.widgetCorsOptions = exports.WEBSITE_PUBLIC_PATHS = exports.WIDGET_PUBLIC_PATH = exports.CorsConfigError = void 0;
 exports.readCorsOptions = readCorsOptions;
 const common_1 = require("@nestjs/common");
 const tenant_context_service_1 = require("../agent/context/tenant-context.service");
@@ -8,6 +8,15 @@ class CorsConfigError extends Error {
 }
 exports.CorsConfigError = CorsConfigError;
 exports.WIDGET_PUBLIC_PATH = '/api/widget/public/';
+exports.WEBSITE_PUBLIC_PATHS = Object.freeze([
+    '/api/website-integrations/connect',
+    '/api/website-integrations/message',
+    '/api/website-integrations/voice-ticket',
+    '/api/website-integrations/product-context',
+    '/api/website-integrations/cart/poll',
+    '/api/website-integrations/cart/result',
+    '/api/website-ingestion/page-view',
+]);
 exports.widgetCorsOptions = {
     origin: true,
     credentials: false,

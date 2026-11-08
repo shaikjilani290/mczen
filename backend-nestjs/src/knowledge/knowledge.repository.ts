@@ -132,7 +132,7 @@ export class KnowledgeRepository extends TenantScopedRepository<ObjectLiteral> {
 
   // ---------- articles ----------
 
-  async insertArticle(manager: EntityManager, a: { id: Buffer; categoryId: Buffer; title: string; summary: string | null; content: string; language: string; status: string; sourceName: string | null; sourceUrl: string | null; referenceNote: string | null; userId: Buffer }): Promise<void> {
+  async insertArticle(manager: EntityManager, a: { id: Buffer; categoryId: Buffer; title: string; summary: string | null; content: string; language: string; status: string; sourceName: string | null; sourceUrl: string | null; referenceNote: string | null; userId: Buffer | null }): Promise<void> {
     await this.run(
       manager,
       `INSERT INTO \`knowledge_articles\` (\`id\`, \`tenant_id\`, \`category_id\`, \`title\`, \`summary\`, \`content\`, \`language_code\`, \`status\`, \`source_name\`, \`source_url\`, \`reference_note\`, \`created_by\`, \`updated_by\`, \`published_at\`)

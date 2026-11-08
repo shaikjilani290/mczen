@@ -43,7 +43,7 @@ export declare class KnowledgeRepository extends TenantScopedRepository<ObjectLi
         sourceName: string | null;
         sourceUrl: string | null;
         referenceNote: string | null;
-        userId: Buffer;
+        userId: Buffer | null;
     }): Promise<void>;
     updateArticle(manager: EntityManager, id: Buffer, fields: Record<string, unknown>, publishing: boolean): Promise<void>;
     findArticle(id: string, manager?: EntityManager, lock?: boolean): Promise<Row>;

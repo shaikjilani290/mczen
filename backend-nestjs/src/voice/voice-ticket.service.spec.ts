@@ -48,6 +48,12 @@ describe('VoiceTicketService', () => {
     await expect(service.consume(issued.ticket, ORIGIN)).rejects.toThrow(UnauthorizedException);
   });
 
+  it('does not treat localhost and 127.0.0.1 merchant origins as interchangeable', async () => {
+    const issued = await service.issue(user, tenant, 'http://127.0.0.1:5173');
+    await expect(service.consume(issued.ticket, 'http://localhost:5173')).rejects.toThrow(UnauthorizedException);
+    await expect(service.consume(issued.ticket, 'http://127.0.0.1:5173')).rejects.toThrow(UnauthorizedException);
+  });
+
   it('allows only one of two concurrent redemptions', async () => {
     const issued = await service.issue(user, tenant, ORIGIN);
     const results = await Promise.allSettled([

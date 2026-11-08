@@ -13,6 +13,10 @@ import { createGetProductsTool } from './implementations/get-products.tool';
 import { createGetProductDetailsTool } from './implementations/get-product-details.tool';
 import { createCheckInventoryTool } from './implementations/check-inventory.tool';
 import { DEMO_PRODUCT_CATALOGUES } from './implementations/demo-catalogues';
+import { WebsiteIntegrationRepository } from '../../website-integrations/website-integration.repository';
+import { createWebsiteIntegrationTools } from '../../website-integrations/website-integration.tools';
+import { MerchantCartService } from '../../website-integrations/merchant-cart.service';
+import { createMerchantCartTools } from '../../website-integrations/merchant-cart.tools';
 import {
   ToolDefinition,
   ToolMetadata,
@@ -37,6 +41,8 @@ export class ToolRegistryService implements OnModuleInit {
   constructor(
     private readonly knowledge: KnowledgeService,
     @Optional() private readonly configuration?: ToolConfigurationRepository,
+    @Optional() private readonly websiteIntegrations?: WebsiteIntegrationRepository,
+    @Optional() private readonly merchantCart?: MerchantCartService,
   ) {}
 
   /**
@@ -51,8 +57,19 @@ export class ToolRegistryService implements OnModuleInit {
     // services). Each is registered through the standard mechanism and
     // enforces its required permissions + input schema via the executor.
     this.register(createGetProductsTool(DEMO_PRODUCT_CATALOGUES));
-    this.register(createGetProductDetailsTool(DEMO_PRODUCT_CATALOGUES));
+    const demoProductDetails = createGetProductDetailsTool(DEMO_PRODUCT_CATALOGUES);
+    if (!this.websiteIntegrations) this.register(demoProductDetails);
     this.register(createCheckInventoryTool(DEMO_PRODUCT_CATALOGUES));
+    if (this.websiteIntegrations) {
+      for (const tool of createWebsiteIntegrationTools(this.websiteIntegrations, this.merchantCart)) {
+        this.register(tool.name === 'get_product_details'
+          ? productDetailsForContext(tool, demoProductDetails)
+          : tool);
+      }
+    }
+    if (this.merchantCart) {
+      for (const tool of createMerchantCartTools(this.merchantCart)) this.register(tool);
+    }
     if (this.configuration?.configured) {
       await this.configuration.syncCatalog([...this.tools.values()]);
     }
@@ -195,6 +212,33 @@ export class ToolRegistryService implements OnModuleInit {
     if (!this.configuration?.configured || !isUuidv7(tenantId)) return {};
     return this.configuration.executionSecrets(name);
   }
+}
+
+function productDetailsForContext(website: ToolDefinition, demo: ToolDefinition): ToolDefinition {
+  return {
+    ...website,
+    description: `${website.description} Use externalProductId for imported products. Only legacy demonstration tenants use productId.`,
+    inputSchema: {
+      ...website.inputSchema,
+      required: [],
+      properties: { ...website.inputSchema.properties, ...demo.inputSchema.properties },
+    },
+    handler: async (input, context, signal, runtime) => {
+      // UUID tenants always use persisted merchant data, never a demo fallback.
+      if (isUuidv7(context.tenantId)) {
+        if (input.productId !== undefined || typeof input.externalProductId !== 'string' ||
+            input.externalProductId.trim().length === 0) {
+          throw new BadRequestException('externalProductId is required for imported product details.');
+        }
+        return website.handler(input, context, signal, runtime);
+      }
+      if (input.externalProductId !== undefined || input.integrationId !== undefined ||
+          typeof input.productId !== 'string' || input.productId.trim().length === 0) {
+        throw new BadRequestException('productId is required for demonstration product details.');
+      }
+      return demo.handler(input, context, signal, runtime);
+    },
+  };
 }
 
 /** Strips handler internals and copies mutable fields defensively. */

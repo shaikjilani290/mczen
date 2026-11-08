@@ -110,18 +110,43 @@ describe('VoiceGateway ticket handshake', () => {
     expect(sessions.begin).not.toHaveBeenCalled();
   });
 
-  it('starts a session for a widget ticket from a third-party origin', async () => {
+  it.each(['https://shop.example.test', 'http://localhost:5173', 'http://127.0.0.1:5173'])('starts a bound widget session from %s', async (origin) => {
     const widgetIdentity: VoiceIdentity = {
       ...identity, userId: '',
       widget: { assistantId: 'a', conversationId: 'c', widgetSessionId: 'w' },
     };
     tickets.consume.mockResolvedValue(widgetIdentity);
-    client = openClient(server, 'https://shop.example.test');
+    client = openClient(server, origin);
     await once(client, 'open');
     client.send(JSON.stringify({ v: 1, type: 'voice.session.start', ts: new Date().toISOString(), data: { ticket: 'mzt_x', language: 'en' } }));
     await waitFor(() => sessions.begin.mock.calls.length === 1);
     expect(sessions.begin.mock.calls[0][1]).toBe(widgetIdentity);
+    expect(tickets.consume).toHaveBeenCalledWith('mzt_x', origin);
   });
+
+  it('keeps the startup deadline active until session creation finishes and aborts a hung start', async () => {
+    let startupSignal: AbortSignal | undefined;
+    sessions.begin.mockImplementation((_socket, _identity, _data, _ua, signal: AbortSignal) => {
+      startupSignal = signal;
+      return new Promise(() => {});
+    });
+    client = openClient(server);
+    await once(client, 'open');
+    const message = once(client, 'message');
+    const closed = once(client, 'close');
+    client.send(JSON.stringify({
+      v: 1, type: 'voice.session.start', ts: new Date().toISOString(), data: { ticket: 'mzt_x', assistantId: 'a' },
+    }));
+    await waitFor(() => sessions.begin.mock.calls.length === 1);
+    expect(startupSignal?.aborted).toBe(false);
+    const [error] = await message;
+    expect(JSON.parse(String(error)).data).toMatchObject({
+      code: 'SESSION_START_TIMEOUT', recoverable: false,
+    });
+    expect(startupSignal?.aborted).toBe(true);
+    const [code] = await closed;
+    expect(code).toBe(4410);
+  }, 8_000);
 
   it('rejects malformed origins at upgrade', async () => {
     client = openClient(server, 'https://user:pw@shop.example.test');

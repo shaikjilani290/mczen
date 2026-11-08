@@ -36,7 +36,9 @@ class WidgetSessionTokens {
             const now = this.now();
             if (typeof claims.t !== 'string' || typeof claims.a !== 'string' || typeof claims.o !== 'string' ||
                 typeof claims.e !== 'number' || typeof claims.m !== 'number' || claims.e <= now || claims.m <= now ||
-                (claims.s !== undefined && (typeof claims.s !== 'string' || !/^[0-9a-f-]{36}$/.test(claims.s))))
+                (claims.s !== undefined && (typeof claims.s !== 'string' || !/^[0-9a-f-]{36}$/.test(claims.s))) ||
+                (claims.i !== undefined && (typeof claims.i !== 'string' || !/^[0-9a-f-]{36}$/.test(claims.i))) ||
+                (claims.k !== undefined && (typeof claims.k !== 'string' || !/^[a-f0-9]{64}$/.test(claims.k))))
                 return undefined;
             return claims;
         }

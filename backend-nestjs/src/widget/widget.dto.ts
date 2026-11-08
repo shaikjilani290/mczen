@@ -34,6 +34,7 @@ function text(value: unknown, field: string, min: number, max: number): string {
   if (typeof value !== 'string') throw new BadRequestException(`${field} is invalid.`);
   const trimmed = value.trim();
   // Control characters have no place in widget copy.
+  // eslint-disable-next-line no-control-regex
   if (trimmed.length < min || trimmed.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(trimmed)) {
     throw new BadRequestException(`${field} is invalid.`);
   }
@@ -102,20 +103,32 @@ export function isPublicKey(value: unknown): value is string {
   return typeof value === 'string' && PUBLIC_KEY.test(value);
 }
 
-export function parsePublicSession(body: unknown): { publicKey: string; language?: WidgetLanguage } {
-  const input = record(body, ['publicKey', 'language']);
-  if (!isPublicKey(input.publicKey)) throw new BadRequestException('The widget key is invalid.');
+export function parsePublicSession(body: unknown): { publicKey: string; assistantId?: string; language?: WidgetLanguage } {
+  const input = record(body, ['publicKey', 'assistantId', 'language']);
+  const publicKey = input.publicKey;
+  const widgetKey = isPublicKey(publicKey);
+  const integrationKey = typeof publicKey === 'string' && /^mzp_[A-Za-z0-9_-]{43}$/.test(publicKey);
+  if (!widgetKey && !integrationKey) throw new BadRequestException('The widget key is invalid.');
+  if (input.assistantId !== undefined && (typeof input.assistantId !== 'string' || !isUuidv7(input.assistantId))) {
+    throw new BadRequestException('assistantId is invalid.');
+  }
+  if (input.assistantId !== undefined && !integrationKey) throw new BadRequestException('assistantId is only valid for a website integration.');
   return {
-    publicKey: input.publicKey,
+    publicKey: publicKey as string,
+    ...(input.assistantId ? { assistantId: input.assistantId as string } : {}),
     ...(input.language !== undefined ? { language: oneOf(input.language, WIDGET_LANGUAGES, 'language') } : {}),
   };
 }
 
-export function parsePublicMessage(body: unknown): { message: string; language?: WidgetLanguage } {
-  const input = record(body, ['message', 'language']);
+export function parsePublicMessage(body: unknown): { message: string; language?: WidgetLanguage; requestId?: string } {
+  const input = record(body, ['message', 'language', 'requestId']);
+  if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-zA-Z0-9-]{16,128}$/.test(input.requestId))) {
+    throw new BadRequestException('requestId is invalid.');
+  }
   return {
     message: text(input.message, 'message', 1, 2000),
     ...(input.language !== undefined ? { language: oneOf(input.language, WIDGET_LANGUAGES, 'language') } : {}),
+    ...(input.requestId !== undefined ? { requestId: input.requestId as string } : {}),
   };
 }
 

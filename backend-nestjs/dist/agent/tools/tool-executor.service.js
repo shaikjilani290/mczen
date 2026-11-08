@@ -8,6 +8,7 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
+var ToolExecutorService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ToolExecutorService = void 0;
 const common_1 = require("@nestjs/common");
@@ -17,11 +18,12 @@ const tool_registry_service_1 = require("./tool-registry.service");
 const tool_permission_service_1 = require("./tool-permission.service");
 const tool_validation_service_1 = require("./tool-validation.service");
 const tool_audit_service_1 = require("./tool-audit.service");
-let ToolExecutorService = class ToolExecutorService {
+let ToolExecutorService = ToolExecutorService_1 = class ToolExecutorService {
     toolRegistry;
     permissions;
     validation;
     audit;
+    logger = new common_1.Logger(ToolExecutorService_1.name);
     constructor(toolRegistry, permissions, validation, audit) {
         this.toolRegistry = toolRegistry;
         this.permissions = permissions;
@@ -42,6 +44,11 @@ let ToolExecutorService = class ToolExecutorService {
         const serializedSummary = JSON.stringify(argumentsSummary);
         const argumentsDigest = (0, node_crypto_1.createHash)('sha256').update(serializedSummary).digest('hex');
         const finish = async (outcome, errorCode, resultSummary) => {
+            if (context.modality === 'voice')
+                this.logger.log({
+                    event: 'voice_tool_timing', requestId: context.requestId, toolName: name ?? 'invalid_tool',
+                    durationMs: Date.now() - startedAt, outcome, errorCode,
+                });
             await this.audit.record({
                 tenantId: context.tenantId,
                 toolName: name ?? 'invalid_tool',
@@ -248,7 +255,7 @@ let ToolExecutorService = class ToolExecutorService {
     }
 };
 exports.ToolExecutorService = ToolExecutorService;
-exports.ToolExecutorService = ToolExecutorService = __decorate([
+exports.ToolExecutorService = ToolExecutorService = ToolExecutorService_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [tool_registry_service_1.ToolRegistryService,
         tool_permission_service_1.ToolPermissionService,

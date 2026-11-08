@@ -6,6 +6,11 @@ export interface AgentExecutionContext {
     channel?: 'widget';
     language?: 'en' | 'hi' | 'te';
     assistantId?: string;
+    merchant?: {
+        integrationId: string;
+        sessionId: string;
+        origin: string;
+    };
     permissions: readonly string[];
     requestId: string;
 }

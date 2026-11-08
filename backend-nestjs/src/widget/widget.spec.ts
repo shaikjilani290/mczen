@@ -155,6 +155,19 @@ describe('WidgetService public access', () => {
     await service.ask(first.sessionToken, origin, 'Again', undefined);
     expect(repository.createWidgetConversation).toHaveBeenCalledTimes(1);
   });
+  it('returns structured product cards from the agent to the public widget', async () => {
+    const { service, agent } = build();
+    const { sessionToken } = await service.createSession(KEY, origin, undefined, 'p');
+    const card = {
+      externalProductId: 'sku-1', name: 'Tea', productUrl: 'https://shop.example.test/tea',
+      images: ['https://shop.example.test/tea.jpg'], price: 2500, salePrice: 1800, currency: 'INR',
+    };
+    agent.ask.mockImplementation(async () => ({ success: true, answer: 'Tea', model: 'm', toolCalls: [], sources: [], products: [card] }) as never);
+    const result = await service.ask(sessionToken, origin, 'Tea?', undefined);
+    expect(result.products).toEqual([card]);
+    agent.ask.mockImplementation(async () => ({ success: true, answer: 'Hi', model: 'm', toolCalls: [], sources: [] }));
+    expect(await service.ask(result.sessionToken, origin, 'Hi', undefined)).not.toHaveProperty('products');
+  });
   it('rejects tokens from another origin, tampered tokens, and revoked domains', async () => {
     const { service, repository } = build();
     const { sessionToken } = await service.createSession(KEY, origin, undefined, 'p');

@@ -23,7 +23,9 @@ let ConversationsController = class ConversationsController {
         this.conversations = conversations;
     }
     create(body, user) {
-        return this.conversations.create({ ...(0, conversations_dto_1.parseCreateConversation)(body), userId: user.userId });
+        return this.conversations
+            .create({ ...(0, conversations_dto_1.parseCreateConversation)(body), userId: user.userId })
+            .then((id) => ({ id }));
     }
     list(query, user) {
         return this.conversations.list({

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AuthSecurityState1740000000005 = exports.AuthPendingTokens1740000000004 = exports.SeedGlobalCatalogs1740000000003 = exports.DomainBAuth1740000000002 = exports.DomainATenants1740000000001 = exports.AssistantConfiguration1740000000006 = exports.VoiceRuntime1740000000010 = exports.ConversationPersistence1740000000009 = exports.ToolConfiguration1740000000008 = exports.KnowledgeManagement1740000000007 = exports.WidgetSettings1740000000011 = exports.AuditEvents1740000000012 = exports.ALL_MIGRATIONS = void 0;
+exports.AuthSecurityState1740000000005 = exports.AuthPendingTokens1740000000004 = exports.SeedGlobalCatalogs1740000000003 = exports.DomainBAuth1740000000002 = exports.DomainATenants1740000000001 = exports.AssistantConfiguration1740000000006 = exports.VoiceRuntime1740000000010 = exports.ConversationPersistence1740000000009 = exports.ToolConfiguration1740000000008 = exports.KnowledgeManagement1740000000007 = exports.WidgetSettings1740000000011 = exports.WebsiteIntegrations1740000000013 = exports.AuditEvents1740000000012 = exports.ALL_MIGRATIONS = void 0;
 const _1740000000001_DomainATenants_1 = require("./1740000000001-DomainATenants");
 Object.defineProperty(exports, "DomainATenants1740000000001", { enumerable: true, get: function () { return _1740000000001_DomainATenants_1.DomainATenants1740000000001; } });
 const _1740000000002_DomainBAuth_1 = require("./1740000000002-DomainBAuth");
@@ -25,6 +25,8 @@ const _1740000000011_WidgetSettings_1 = require("./1740000000011-WidgetSettings"
 Object.defineProperty(exports, "WidgetSettings1740000000011", { enumerable: true, get: function () { return _1740000000011_WidgetSettings_1.WidgetSettings1740000000011; } });
 const _1740000000012_AuditEvents_1 = require("./1740000000012-AuditEvents");
 Object.defineProperty(exports, "AuditEvents1740000000012", { enumerable: true, get: function () { return _1740000000012_AuditEvents_1.AuditEvents1740000000012; } });
+const _1740000000013_WebsiteIntegrations_1 = require("./1740000000013-WebsiteIntegrations");
+Object.defineProperty(exports, "WebsiteIntegrations1740000000013", { enumerable: true, get: function () { return _1740000000013_WebsiteIntegrations_1.WebsiteIntegrations1740000000013; } });
 exports.ALL_MIGRATIONS = [
     _1740000000001_DomainATenants_1.DomainATenants1740000000001,
     _1740000000002_DomainBAuth_1.DomainBAuth1740000000002,
@@ -38,5 +40,6 @@ exports.ALL_MIGRATIONS = [
     _1740000000010_VoiceRuntime_1.VoiceRuntime1740000000010,
     _1740000000011_WidgetSettings_1.WidgetSettings1740000000011,
     _1740000000012_AuditEvents_1.AuditEvents1740000000012,
+    _1740000000013_WebsiteIntegrations_1.WebsiteIntegrations1740000000013,
 ];
 //# sourceMappingURL=index.js.map

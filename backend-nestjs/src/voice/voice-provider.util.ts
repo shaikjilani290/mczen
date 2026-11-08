@@ -22,24 +22,32 @@ export function readLoopbackUrl(name: string, defaultValue: string): URL {
   return url;
 }
 
-export async function fetchWithTimeout(
+export function fetchWithTimeout(input: URL, init: RequestInit, timeoutMs: number): Promise<Response>;
+export function fetchWithTimeout<T>(
+  input: URL, init: RequestInit, timeoutMs: number, readResponse: (response: Response) => Promise<T>,
+): Promise<T>;
+export async function fetchWithTimeout<T>(
   input: URL,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+  readResponse?: (response: Response) => Promise<T>,
+): Promise<Response | T> {
   const controller = new AbortController();
   const parentSignal = init.signal;
   const onAbort = () => controller.abort();
   parentSignal?.addEventListener('abort', onAbort, { once: true });
+  if (parentSignal?.aborted) controller.abort();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch {
+    const response = await fetch(input, { ...init, signal: controller.signal });
+    return readResponse ? await readResponse(response) : response;
+  } catch (error) {
     if (parentSignal?.aborted || timedOut) throw new VoiceProviderError('VOICE_PROVIDER_TIMEOUT');
+    if (error instanceof VoiceProviderError) throw error;
     throw new VoiceProviderError('VOICE_ENGINE_UNAVAILABLE');
   } finally {
     clearTimeout(timer);
@@ -58,8 +66,8 @@ export class Semaphore {
 
   constructor(private readonly maxActive: number, private readonly maxQueued: number) {}
 
-  async run<T>(operation: () => Promise<T>): Promise<T> {
-    const release = await this.acquire();
+  async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const release = await this.acquire(signal);
     try {
       return await operation();
     } finally {

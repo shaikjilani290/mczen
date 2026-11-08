@@ -10,6 +10,15 @@ export class CorsConfigError extends Error {}
  * No credentials are allowed; the session token travels in the Authorization header.
  */
 export const WIDGET_PUBLIC_PATH = '/api/widget/public/';
+export const WEBSITE_PUBLIC_PATHS = Object.freeze([
+  '/api/website-integrations/connect',
+  '/api/website-integrations/message',
+  '/api/website-integrations/voice-ticket',
+  '/api/website-integrations/product-context',
+  '/api/website-integrations/cart/poll',
+  '/api/website-integrations/cart/result',
+  '/api/website-ingestion/page-view',
+]);
 export const widgetCorsOptions: CorsOptions = {
   origin: true,
   credentials: false,

@@ -79,7 +79,7 @@ let WidgetPublicController = class WidgetPublicController {
     }
     session(body, origin, request) {
         const input = (0, widget_dto_1.parsePublicSession)(body);
-        return this.widget.createSession(input.publicKey, origin, input.language, request.ip ?? request.socket.remoteAddress);
+        return this.widget.createSession(input.publicKey, origin, input.language, request.ip ?? request.socket.remoteAddress, input.assistantId);
     }
     message(body, authorization, origin) {
         const input = (0, widget_dto_1.parsePublicMessage)(body);

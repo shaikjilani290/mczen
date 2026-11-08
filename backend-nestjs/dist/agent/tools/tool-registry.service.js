@@ -22,19 +22,40 @@ const get_products_tool_1 = require("./implementations/get-products.tool");
 const get_product_details_tool_1 = require("./implementations/get-product-details.tool");
 const check_inventory_tool_1 = require("./implementations/check-inventory.tool");
 const demo_catalogues_1 = require("./implementations/demo-catalogues");
+const website_integration_repository_1 = require("../../website-integrations/website-integration.repository");
+const website_integration_tools_1 = require("../../website-integrations/website-integration.tools");
+const merchant_cart_service_1 = require("../../website-integrations/merchant-cart.service");
+const merchant_cart_tools_1 = require("../../website-integrations/merchant-cart.tools");
 let ToolRegistryService = class ToolRegistryService {
     knowledge;
     configuration;
+    websiteIntegrations;
+    merchantCart;
     tools = new Map();
-    constructor(knowledge, configuration) {
+    constructor(knowledge, configuration, websiteIntegrations, merchantCart) {
         this.knowledge = knowledge;
         this.configuration = configuration;
+        this.websiteIntegrations = websiteIntegrations;
+        this.merchantCart = merchantCart;
     }
     async onModuleInit() {
         this.register((0, knowledge_search_tool_1.createKnowledgeSearchTool)(this.knowledge));
         this.register((0, get_products_tool_1.createGetProductsTool)(demo_catalogues_1.DEMO_PRODUCT_CATALOGUES));
-        this.register((0, get_product_details_tool_1.createGetProductDetailsTool)(demo_catalogues_1.DEMO_PRODUCT_CATALOGUES));
+        const demoProductDetails = (0, get_product_details_tool_1.createGetProductDetailsTool)(demo_catalogues_1.DEMO_PRODUCT_CATALOGUES);
+        if (!this.websiteIntegrations)
+            this.register(demoProductDetails);
         this.register((0, check_inventory_tool_1.createCheckInventoryTool)(demo_catalogues_1.DEMO_PRODUCT_CATALOGUES));
+        if (this.websiteIntegrations) {
+            for (const tool of (0, website_integration_tools_1.createWebsiteIntegrationTools)(this.websiteIntegrations, this.merchantCart)) {
+                this.register(tool.name === 'get_product_details'
+                    ? productDetailsForContext(tool, demoProductDetails)
+                    : tool);
+            }
+        }
+        if (this.merchantCart) {
+            for (const tool of (0, merchant_cart_tools_1.createMerchantCartTools)(this.merchantCart))
+                this.register(tool);
+        }
         if (this.configuration?.configured) {
             await this.configuration.syncCatalog([...this.tools.values()]);
         }
@@ -131,9 +152,38 @@ exports.ToolRegistryService = ToolRegistryService;
 exports.ToolRegistryService = ToolRegistryService = __decorate([
     (0, common_1.Injectable)(),
     __param(1, (0, common_1.Optional)()),
+    __param(2, (0, common_1.Optional)()),
+    __param(3, (0, common_1.Optional)()),
     __metadata("design:paramtypes", [knowledge_service_1.KnowledgeService,
-        tool_configuration_repository_1.ToolConfigurationRepository])
+        tool_configuration_repository_1.ToolConfigurationRepository,
+        website_integration_repository_1.WebsiteIntegrationRepository,
+        merchant_cart_service_1.MerchantCartService])
 ], ToolRegistryService);
+function productDetailsForContext(website, demo) {
+    return {
+        ...website,
+        description: `${website.description} Use externalProductId for imported products. Only legacy demonstration tenants use productId.`,
+        inputSchema: {
+            ...website.inputSchema,
+            required: [],
+            properties: { ...website.inputSchema.properties, ...demo.inputSchema.properties },
+        },
+        handler: async (input, context, signal, runtime) => {
+            if ((0, uuid_1.isUuidv7)(context.tenantId)) {
+                if (input.productId !== undefined || typeof input.externalProductId !== 'string' ||
+                    input.externalProductId.trim().length === 0) {
+                    throw new common_1.BadRequestException('externalProductId is required for imported product details.');
+                }
+                return website.handler(input, context, signal, runtime);
+            }
+            if (input.externalProductId !== undefined || input.integrationId !== undefined ||
+                typeof input.productId !== 'string' || input.productId.trim().length === 0) {
+                throw new common_1.BadRequestException('productId is required for demonstration product details.');
+            }
+            return demo.handler(input, context, signal, runtime);
+        },
+    };
+}
 function toMetadata(tool) {
     return {
         name: tool.name,

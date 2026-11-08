@@ -3,14 +3,22 @@ from threading import Lock
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
+from threading import local, Thread
+from contextlib import contextmanager
+from io import BytesIO
 
 import numpy as np
 from pydantic import ValidationError
 
-from server import Silero, TtsInput, VadInput, pcm16
+from server import Silero, TtsInput, VadInput, pcm16, recognition_quality, cpu_session_options, create_app
 from download_models import download
+from stt_profile import ProfiledWhisperModel, TimedFeatures
+from temporary_audio import TemporaryAudio
+import os
+import time
 
 
 class FakeModel:
@@ -23,6 +31,27 @@ class FakeModel:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_temporary_audio_needs_consent_and_expires_without_continued_capture(self):
+        disabled = TemporaryAudio()
+        disabled.save(b"not stored")
+        self.assertIsNone(disabled.directory)
+        with patch.dict(os.environ, {"NODE_ENV": "production"}):
+            with self.assertRaises(ValueError):
+                TemporaryAudio(consent=True)
+        recorder = TemporaryAudio(consent=True, ttl_seconds=0.1)
+        directory = recorder.directory
+        try:
+            recorder.save(b"\x00\x00" * 320)
+            self.assertEqual(len(list(directory.iterdir())), 1)
+            deadline = time.monotonic() + 2
+            while directory.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(directory.exists())
+            recorder.save(b"expired")
+            self.assertIsNone(recorder.directory)
+        finally:
+            recorder.close()
+
     def setUp(self):
         self.vad = Silero.__new__(Silero)
         self.vad.model = FakeModel()
@@ -54,6 +83,41 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(inputs["input"].any())
         self.assertEqual(self.vad.streams[one]["hidden"][0, 0, 0], 2)
 
+    def test_batch_keeps_nonoverlapping_windows_in_exact_sample_order(self):
+        stream = str(uuid4())
+        audio = np.arange(1600, dtype=np.float32)
+        for offset in range(0, audio.size, 320):
+            self.vad.predict(stream, audio[offset:offset + 320])
+        windows = [entry["input"][0, 64:] for entry in self.vad.model.inputs]
+        self.assertEqual(len(windows), 3)
+        np.testing.assert_array_equal(np.concatenate(windows), audio[:1536])
+        np.testing.assert_array_equal(self.vad.streams[stream]["pending"], audio[1536:])
+
+    def test_batch_holds_one_model_lock_and_matches_individual_frame_decisions(self):
+        class CountingLock:
+            def __init__(self):
+                self.entries = 0
+
+            def __enter__(self):
+                self.entries += 1
+
+            def __exit__(self, *_args):
+                pass
+
+        self.vad.lock = CountingLock()
+        stream = str(uuid4())
+        audio = np.arange(1600, dtype=np.float32)
+        profile = {}
+        decisions = self.vad.predict_batch(stream, audio, profile=profile)
+        self.assertGreaterEqual(profile["sileroLockWaitMs"], 0)
+        self.assertGreater(profile["sileroInferenceMs"], 0)
+        self.assertEqual(self.vad.lock.entries, 1)
+        self.assertEqual(len(decisions), 5)
+        self.assertEqual(decisions[0]["probability"], 0)
+        self.assertTrue(all(result["speech"] for result in decisions[1:]))
+        windows = [entry["input"][0, 64:] for entry in self.vad.model.inputs]
+        np.testing.assert_array_equal(np.concatenate(windows), audio[:1536])
+
     def test_expired_stream_state_is_removed(self):
         old, fresh = str(uuid4()), str(uuid4())
         self.vad.predict(old, np.zeros(320, dtype=np.float32))
@@ -78,6 +142,108 @@ class RuntimeTests(unittest.TestCase):
             TtsInput(**{**request, "language": "te"})
         with self.assertRaises(ValidationError):
             TtsInput(**{**request, "rate": float("nan")})
+
+    def test_cpu_onnx_sessions_do_not_spin_or_create_unbounded_pools(self):
+        options = cpu_session_options(2)
+        self.assertEqual(options.intra_op_num_threads, 2)
+        self.assertEqual(options.inter_op_num_threads, 1)
+        self.assertEqual(options.get_session_config_entry("session.intra_op.allow_spinning"), "0")
+        self.assertEqual(options.get_session_config_entry("session.inter_op.allow_spinning"), "0")
+
+    def test_recognition_quality_is_not_a_fabricated_confidence_probability(self):
+        segment = lambda logprob, silence: SimpleNamespace(start=0, end=2, avg_logprob=logprob, no_speech_prob=silence)
+        self.assertTrue(recognition_quality([segment(-0.2, 0.01)])["reliable"])
+        self.assertEqual(recognition_quality([segment(-1.1, 0.01)])["reason"], "low_log_probability")
+        self.assertEqual(recognition_quality([segment(-0.2, 0.7)])["reason"], "likely_no_speech")
+        self.assertEqual(recognition_quality([]), {"reliable": False, "reason": "no_speech"})
+
+    def test_microphone_diagnostics_report_silence_and_clipping_without_retaining_audio(self):
+        silent = recognition_quality([], np.zeros(320, dtype=np.float32))
+        self.assertEqual(silent["audioRms"], 0)
+        self.assertEqual(silent["clippedFraction"], 0)
+        clipped = recognition_quality([], np.array([0, 1, -1, 0], dtype=np.float32))
+        self.assertEqual(clipped["audioPeak"], 1)
+        self.assertAlmostEqual(clipped["audioRms"], 2 ** -0.5)
+        self.assertEqual(clipped["clippedFraction"], 0.5)
+
+    def test_feature_profiling_preserves_samples_and_extractor_attributes(self):
+        class Extractor:
+            sampling_rate = 16000
+
+            def __call__(self, audio, **kwargs):
+                return audio
+
+        model = ProfiledWhisperModel.__new__(ProfiledWhisperModel)
+        model.profile = local()
+        features = TimedFeatures(Extractor(), model.measure)
+        audio = np.arange(640, dtype=np.float32)
+        with model.profiling() as stages:
+            self.assertIs(features(audio, chunk_length=None), audio)
+        self.assertEqual(features.sampling_rate, 16000)
+        self.assertGreaterEqual(stages["featureMs"], 0)
+        self.assertEqual(stages["encoderMs"], 0)
+        self.assertIsNone(model.profile.timings)
+
+    def test_candidate_is_english_only_and_preserves_pcm_and_fallback(self):
+        created = []
+
+        class FakeWhisper:
+            def __init__(self, path, **kwargs):
+                self.path = path
+                self.received = []
+                created.append(self)
+
+            @contextmanager
+            def profiling(self):
+                yield {"featureMs": 1.0, "encoderMs": 2.0, "decoderMs": 3.0}
+
+            def transcribe(self, audio, **kwargs):
+                self.received.append((audio.copy(), kwargs))
+                segment = SimpleNamespace(text=" Open my cart.", start=0, end=1,
+                                          avg_logprob=-0.2, no_speech_prob=0.01)
+                return iter([segment]), SimpleNamespace(language=kwargs["language"] or "en")
+
+        with patch("stt_profile.ProfiledWhisperModel", FakeWhisper):
+            app = create_app("stt", Path("models"), english_model="base.en")
+        endpoint = next(route.endpoint for route in app.routes if route.path == "/transcribe")
+        original = np.arange(-320, 320, dtype="<i2")
+        request = SimpleNamespace(state=SimpleNamespace(received_at=0), headers={})
+        for language in ("en", "hi", "te", None):
+            result = endpoint(request=request, file=SimpleNamespace(file=BytesIO(original.tobytes())),
+                              encoding="pcm_s16le", sample_rate=16000, channels=1,
+                              partial=False, model="faster-whisper-small-int8", language=language)
+            self.assertEqual(result["text"], "Open my cart.")
+            selected = created[1] if language == "en" else created[0]
+            audio, options = selected.received[-1]
+            np.testing.assert_array_equal(audio, original.astype(np.float32) / 32768)
+            self.assertFalse(options.get("vad_filter", False))
+            self.assertEqual(options["beam_size"], 1)
+            self.assertEqual(result["timings"]["encoderMs"], 2)
+            self.assertTrue(all(value >= 0 for value in result["timings"].values()))
+        self.assertIn("whisper-small", created[0].path)
+        self.assertIn("whisper-base.en", created[1].path)
+
+    def test_stt_profiling_is_request_local_and_cleans_up_on_failure(self):
+        model = ProfiledWhisperModel.__new__(ProfiledWhisperModel)
+        model.profile = local()
+        thread_results = []
+
+        def other_request():
+            with model.profiling() as timings:
+                timings["encoderMs"] = 42
+                thread_results.append(timings)
+
+        with model.profiling() as timings:
+            thread = Thread(target=other_request)
+            thread.start()
+            thread.join()
+            self.assertEqual(timings["encoderMs"], 0)
+        self.assertEqual(thread_results[0]["encoderMs"], 42)
+        with self.assertRaisesRegex(RuntimeError, "inference failed"):
+            with model.profiling():
+                with model.measure("encoderMs"):
+                    raise RuntimeError("inference failed")
+        self.assertIsNone(model.profile.timings)
 
 
 class DownloadTests(unittest.TestCase):

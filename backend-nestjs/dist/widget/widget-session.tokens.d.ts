@@ -3,6 +3,8 @@ export interface WidgetSessionClaims {
     a: string;
     c?: string;
     s?: string;
+    i?: string;
+    k?: string;
     o: string;
     e: number;
     m: number;

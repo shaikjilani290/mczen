@@ -41,3 +41,15 @@ export const platform = {
   tenants: (query) => request("GET", "/api/platform/tenants", { query }),
   setStatus: (id, status) => request("PATCH", `/api/platform/tenants/${encodeURIComponent(id)}/status`, { body: { status } }),
 };
+
+export const websiteIntegrations = {
+  list: () => request("GET", "/api/website-integrations"),
+  create: (body) => request("POST", "/api/website-integrations", { body }),
+  status: (id) => request("GET", `/api/website-integrations/${encodeURIComponent(id)}/status`),
+  pages: (id, query = {}) => request("GET", `/api/website-integrations/${encodeURIComponent(id)}/pages`, { query }),
+  products: (id, query = {}) => request("GET", `/api/website-integrations/${encodeURIComponent(id)}/products`, { query }),
+  knowledge: (id, query = {}) => request("GET", `/api/website-integrations/${encodeURIComponent(id)}/knowledge`, { query }),
+  sync: (id) => request("POST", `/api/website-integrations/${encodeURIComponent(id)}/sync`, { body: {} }),
+  rotateKeys: (id) => request("POST", `/api/website-integrations/${encodeURIComponent(id)}/keys/rotate`, { body: {} }),
+  revoke: (id) => request("POST", `/api/website-integrations/${encodeURIComponent(id)}/revoke`, { body: {} }),
+};

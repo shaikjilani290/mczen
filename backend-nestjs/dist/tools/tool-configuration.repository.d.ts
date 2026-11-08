@@ -1,4 +1,4 @@
-import { DataSource, ObjectLiteral } from 'typeorm';
+import { DataSource, EntityManager, ObjectLiteral } from 'typeorm';
 import { TenantScopedRepository } from '../common/tenant/tenant-scoped.repository';
 import type { ToolDefinition } from '../agent/tools/interfaces/tool-definition.interface';
 import { ToolSecretCipher } from './tool-secret-cipher';
@@ -31,6 +31,7 @@ export declare class ToolConfigurationRepository extends TenantScopedRepository<
         config?: Record<string, unknown>;
     }): Promise<void>;
     setAssistantTool(name: string, assistantId: string, enabled: boolean): Promise<void>;
+    enableWebsiteTools(manager: EntityManager, assistantId: string, actorId: string, names: readonly string[]): Promise<void>;
     secretStatus(name: string): Promise<{
         configured: boolean;
         lastRotatedAt: Date | null;

@@ -17,6 +17,6 @@ import { KnowledgeRepository } from './knowledge.repository';
     { provide: KNOWLEDGE_RETRIEVER, useExisting: MysqlKnowledgeRetriever },
     { provide: DocumentStorage, useClass: LocalDocumentStorage },
   ],
-  exports: [KNOWLEDGE_RETRIEVER],
+  exports: [KNOWLEDGE_RETRIEVER, KnowledgeRepository],
 })
 export class KnowledgeModule {}

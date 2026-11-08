@@ -11,6 +11,7 @@ import { ConversationPersistence1740000000009 } from './1740000000009-Conversati
 import { VoiceRuntime1740000000010 } from './1740000000010-VoiceRuntime';
 import { WidgetSettings1740000000011 } from './1740000000011-WidgetSettings';
 import { AuditEvents1740000000012 } from './1740000000012-AuditEvents';
+import { WebsiteIntegrations1740000000013 } from './1740000000013-WebsiteIntegrations';
 export type MigrationCtor = new () => MigrationInterface;
 export declare const ALL_MIGRATIONS: readonly MigrationCtor[];
-export { AuditEvents1740000000012, WidgetSettings1740000000011, KnowledgeManagement1740000000007, ToolConfiguration1740000000008, ConversationPersistence1740000000009, VoiceRuntime1740000000010, AssistantConfiguration1740000000006, DomainATenants1740000000001, DomainBAuth1740000000002, SeedGlobalCatalogs1740000000003, AuthPendingTokens1740000000004, AuthSecurityState1740000000005, };
+export { AuditEvents1740000000012, WebsiteIntegrations1740000000013, WidgetSettings1740000000011, KnowledgeManagement1740000000007, ToolConfiguration1740000000008, ConversationPersistence1740000000009, VoiceRuntime1740000000010, AssistantConfiguration1740000000006, DomainATenants1740000000001, DomainBAuth1740000000002, SeedGlobalCatalogs1740000000003, AuthPendingTokens1740000000004, AuthSecurityState1740000000005, };

@@ -272,6 +272,21 @@ let ToolConfigurationRepository = class ToolConfigurationRepository extends tena
         await this.database.query(`INSERT INTO \`assistant_tools\` (\`tenant_id\`,\`assistant_id\`,\`tool_id\`,\`enabled\`)
        VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE \`enabled\`=VALUES(\`enabled\`)`, [binary, assistantBinary, toolId, enabled ? 1 : 0]);
     }
+    async enableWebsiteTools(manager, assistantId, actorId, names) {
+        const { binary } = this.tenant();
+        const assistantBinary = (0, uuid_1.uuidToBinary)(assistantId);
+        const assistant = await this.run('SELECT 1 FROM `assistants` WHERE `id`=? AND `tenant_id`=? AND `status`=\'active\' AND `deleted_at` IS NULL', [assistantBinary, binary], manager);
+        if (!assistant[0])
+            throw new common_1.NotFoundException('Assistant not found.');
+        const actorBinary = (0, uuid_1.uuidToBinary)(actorId);
+        for (const name of names) {
+            const toolId = await this.toolId(manager, name);
+            await manager.query(`INSERT INTO \`tenant_tools\` (\`id\`,\`tenant_id\`,\`tool_id\`,\`enabled\`,\`extra_permissions\`,\`max_calls_per_conversation\`,\`updated_by\`)
+         VALUES (?,?,?,1,NULL,NULL,?) ON DUPLICATE KEY UPDATE \`enabled\`=1,\`updated_by\`=VALUES(\`updated_by\`)`, [(0, uuid_1.uuidToBinary)((0, uuid_1.newUuidv7)()), binary, toolId, actorBinary]);
+            await manager.query(`INSERT INTO \`assistant_tools\` (\`tenant_id\`,\`assistant_id\`,\`tool_id\`,\`enabled\`)
+         VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE \`enabled\`=1`, [binary, assistantBinary, toolId]);
+        }
+    }
     async secretStatus(name) {
         const { binary } = this.tenant();
         const rows = await this.run(`SELECT \`last_rotated_at\`,\`expires_at\`,\`revoked_at\` FROM \`tool_secrets\`

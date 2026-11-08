@@ -12,6 +12,7 @@ export interface VadResult {
 export interface VoiceActivityPort {
   readonly engineId: string;
   detect(request: VadRequest): Promise<VadResult>;
+  detectBatch?(request: VadRequest): Promise<VadResult[]>;
   healthCheck(): Promise<boolean>;
 }
 

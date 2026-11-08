@@ -12,6 +12,9 @@ import type { VoiceSettings } from './voice.types';
 import { VoiceSessionManager } from './voice-session.manager';
 import { MemorySharedState } from '../shared-state/memory-shared-state';
 import { SharedStateUnavailableError } from '../shared-state/shared-state';
+import { VoiceProviderError } from './voice-provider.util';
+import { ConfiguredSttAdapter } from './stt/configured-stt.adapter';
+import { FasterWhisperAdapter } from './stt/faster-whisper.adapter';
 
 const settings: VoiceSettings = {
   sttEngineId: 'faster-whisper-small-int8',
@@ -53,7 +56,7 @@ function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
 
 describe('VoiceSessionManager', () => {
   let manager: VoiceSessionManager;
-  let makeManager: () => VoiceSessionManager;
+  let makeManager: (sttPort?: SpeechToTextPort) => VoiceSessionManager;
   let store: MemorySharedState;
   let socket: WebSocket;
   let sentEvents: Array<Record<string, unknown>>;
@@ -130,6 +133,10 @@ describe('VoiceSessionManager', () => {
       model: 'test-model',
       toolCalls: [{ name: 'knowledge.search', resultCount: 1 }],
       sources: [{ id: 'source-1', title: 'Help', source: 'knowledge' }],
+      products: [{
+        externalProductId: 'merchant-1', name: 'Tea', productUrl: 'https://shop.example/tea',
+        images: ['https://shop.example/tea.jpg'], price: 2500, salePrice: 1800, currency: 'INR',
+      }],
     };
     agentInvoke = jest.fn().mockResolvedValue(response);
     agent = { invoke: agentInvoke };
@@ -160,7 +167,7 @@ describe('VoiceSessionManager', () => {
         rate: 1,
       }),
     } as unknown as VoiceAuthService;
-    makeManager = () => new VoiceSessionManager(auth, persistence, conversations, stt, vad, tts, agent, store);
+    makeManager = (sttPort = stt) => new VoiceSessionManager(auth, persistence, conversations, sttPort, vad, tts, agent, store);
     manager = makeManager();
   });
 
@@ -180,6 +187,77 @@ describe('VoiceSessionManager', () => {
     }));
     return String(started?.sessionId);
   }
+
+  it.each(['remote', 'fallback', 'both_failed'] as const)(
+    'routes binary voice audio through configured STT to agent/events: %s (providers mocked)',
+    async outcome => {
+      const keys = ['MCZEN_STT_PROVIDER', 'MCZEN_STT_URL', 'MCZEN_STT_API_KEY',
+        'MCZEN_STT_TIMEOUT_MS', 'MCZEN_STT_FALLBACK_ENABLED'] as const;
+      const previous = keys.map(key => process.env[key]);
+      process.env.MCZEN_STT_PROVIDER = 'remote';
+      process.env.MCZEN_STT_URL = 'https://paperspace.example';
+      process.env.MCZEN_STT_API_KEY = 'synthetic-test-key';
+      process.env.MCZEN_STT_TIMEOUT_MS = '30000';
+      process.env.MCZEN_STT_FALLBACK_ENABLED = 'true';
+      const local = new FasterWhisperAdapter();
+      const localTranscribe = jest.spyOn(local, 'transcribe').mockImplementation(sttTranscribe);
+      const localHealth = jest.spyOn(local, 'healthCheck').mockResolvedValue(true);
+      const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        if (!(url instanceof URL)) throw new Error('Expected provider URL.');
+        if (url.pathname === '/health') return new Response('{}');
+        if (outcome !== 'remote') return new Response('', { status: 401 });
+        return new Response(JSON.stringify({
+          success: true, transcript: 'Hello McZEN.', language: 'en',
+          audio_duration: 0.8, processing_time: 0.43, speed: 1.86,
+          device: 'cuda', model: 'small', compute_type: 'int8',
+        }));
+      });
+      if (outcome === 'both_failed') {
+        localTranscribe.mockRejectedValue(new VoiceProviderError('VOICE_ENGINE_UNAVAILABLE'));
+      }
+      try {
+        manager = makeManager(new ConfiguredSttAdapter(local));
+        const sessionId = await beginSession();
+        for (let index = 0; index < 8; index++) {
+          manager.handleBinary(socket, frame(index, 1, 3200));
+          await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
+        }
+        if (outcome === 'both_failed') {
+          await waitFor(() => sentEvents.some(event => event.type === 'voice.session.error'));
+          expect(sentEvents.find(event => event.type === 'voice.session.error')?.data)
+            .toEqual(expect.objectContaining({ code: 'STT_UNAVAILABLE' }));
+          expect(agentInvoke).not.toHaveBeenCalled();
+          expect(sentEvents.some(event => event.type === 'voice.transcript.final')).toBe(false);
+        } else {
+          await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+          const final = sentEvents.find(event => event.type === 'voice.transcript.final');
+          if (!final || typeof final.data !== 'object' || !final.data) throw new Error('Expected final transcript.');
+          const data = final.data as Record<string, unknown>;
+          expect(final.sessionId).toBe(sessionId);
+          expect(data.text).toBe('Hello McZEN.');
+          expect(agentInvoke).toHaveBeenCalledWith('Hello McZEN.',
+            expect.objectContaining({ requestId: data.turnId, modality: 'voice' }), expect.any(AbortSignal));
+          const call = fetch.mock.calls.find(([url]) => url instanceof URL && url.pathname === '/transcribe');
+          expect(call?.[1]?.headers).toEqual(expect.objectContaining({ 'x-mczen-request-id': data.turnId }));
+          expect(sentEvents.find(event => event.type === 'voice.assistant.response')?.sessionId).toBe(sessionId);
+          if (outcome === 'remote') {
+            expect(data.sttProcessingMs).toBe(430);
+            expect(localTranscribe).not.toHaveBeenCalled();
+          }
+        }
+        if (outcome !== 'remote') expect(localTranscribe).toHaveBeenCalledTimes(1);
+      } finally {
+        await manager.closeAll();
+        fetch.mockRestore();
+        localTranscribe.mockRestore();
+        localHealth.mockRestore();
+        keys.forEach((key, index) => {
+          if (previous[index] === undefined) delete process.env[key];
+          else process.env[key] = previous[index];
+        });
+      }
+    },
+  );
 
   it('validates tenant-controlled events and binds the session to its authenticated socket', async () => {
     const sessionId = await beginSession();
@@ -213,6 +291,41 @@ describe('VoiceSessionManager', () => {
     expect(persistenceEvent).toHaveBeenCalledTimes(5);
   });
 
+  it('starts sequence validation afresh per epoch but still reports gaps within an epoch', async () => {
+    vad.detect.mockResolvedValue({ speech: false, probability: 0 });
+    const sessionId = await beginSession();
+    manager.handleBinary(socket, frame(0));
+    await manager.handleText(socket, JSON.stringify({
+      v: 1, type: 'voice.assistant.interrupt', ts: new Date().toISOString(), sessionId, data: {},
+    }));
+    manager.handleBinary(socket, frame(1, 1));
+    manager.handleBinary(socket, frame(2, 1));
+    manager.handleBinary(socket, frame(3, 2));
+    expect(sentEvents.some((e) => (e.data as Record<string, unknown>)?.code === 'SEQUENCE_GAP')).toBe(false);
+    manager.handleBinary(socket, frame(5, 2));
+    expect(sentEvents.filter((e) => (e.data as Record<string, unknown>)?.code === 'SEQUENCE_GAP')).toHaveLength(1);
+  });
+
+  it('keeps the existing 40 audio frames per second limit', async () => {
+    vad.detect.mockResolvedValue({ speech: false, probability: 0 });
+    await beginSession();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      for (let i = 0; i < 41; i++) manager.handleBinary(socket, frame(i));
+      expect(initialSocketClose).toHaveBeenCalledWith(4429, 'RATE_LIMITED');
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('reports a live audio-processing timeout without claiming all speech services are down', async () => {
+    vad.detect.mockRejectedValueOnce(new VoiceProviderError('VOICE_PROVIDER_TIMEOUT'));
+    await beginSession();
+    manager.handleBinary(socket, frame(0));
+    await waitFor(() => sentEvents.some((e) => (e.data as Record<string, unknown>)?.code === 'VOICE_AUDIO_PROCESSING_FAILED'));
+    expect(sentEvents.some((e) => (e.data as Record<string, unknown>)?.code === 'VOICE_ENGINE_UNAVAILABLE')).toBe(false);
+  });
+
   it('limits each authenticated user to one live session', async () => {
     await beginSession();
     const secondSocketClose = jest.fn();
@@ -231,6 +344,7 @@ describe('VoiceSessionManager', () => {
 
   it('resumes with a single-use token bound to the authenticated tenant and user', async () => {
     const sessionId = await beginSession();
+    manager.handleBinary(socket, frame(0));
     const tokenEvent = sentEvents.find((event) => event.type === 'voice.session.resume_token');
     const token = (tokenEvent?.data as Record<string, unknown>)?.token;
     expect(typeof token).toBe('string');
@@ -264,6 +378,8 @@ describe('VoiceSessionManager', () => {
     expect(sentEvents.some((event) =>
       event.type === 'voice.session.resumed' && event.sessionId === sessionId,
     )).toBe(true);
+    manager.handleBinary(resumedSocket, frame(5, 2));
+    expect(sentEvents.some((event) => (event.data as Record<string, unknown>)?.code === 'SEQUENCE_GAP')).toBe(false);
 
     const replaySocketClose = jest.fn();
     const replaySocket = {
@@ -359,6 +475,38 @@ describe('VoiceSessionManager', () => {
     }
   });
 
+  it('replaces only a disconnected widget session belonging to the same verified conversation', async () => {
+    const visitor = widgetIdentity();
+    const first = fakeSocket();
+    await manager.begin(first.ws, visitor, {});
+    manager.onDisconnect(first.ws);
+    const replacement = fakeSocket();
+    await manager.begin(replacement.ws, visitor, {});
+    expect(replacement.events.some(event => event.type === 'voice.session.started')).toBe(true);
+    expect(manager.activeSessionCount).toBe(1);
+    expect(persistence.close).toHaveBeenCalledWith(expect.anything(), 'disconnected_session_replaced', null);
+    const started = replacement.events.find(event => event.type === 'voice.session.started');
+    expect((started?.data as { settings: { conversationId: string } }).settings.conversationId)
+      .toBe(visitor.widget?.conversationId);
+  });
+
+  it('does not replace an active socket or a disconnected visitor on a different conversation', async () => {
+    const visitor = widgetIdentity();
+    const first = fakeSocket();
+    await manager.begin(first.ws, visitor, {});
+    const activeDuplicate = fakeSocket();
+    await manager.begin(activeDuplicate.ws, visitor, {});
+    expect(activeDuplicate.close).toHaveBeenCalledWith(4409, 'SESSION_LIMIT_REACHED');
+    manager.onDisconnect(first.ws);
+    const wrongConversation = fakeSocket();
+    await manager.begin(wrongConversation.ws, {
+      ...visitor, widget: { ...visitor.widget!, conversationId: newUuidv7() },
+    }, {});
+    expect(wrongConversation.close).toHaveBeenCalledWith(4409, 'SESSION_LIMIT_REACHED');
+    expect(manager.activeSessionCount).toBe(1);
+    expect(persistence.close).not.toHaveBeenCalled();
+  });
+
   it('refuses to resume a session owned by another instance and fails safely', async () => {
     const sessionId = await beginSession();
     const token = String((sentEvents.find((event) => event.type === 'voice.session.resume_token')?.data as Record<string, unknown>).token);
@@ -399,12 +547,44 @@ describe('VoiceSessionManager', () => {
       model: 'test-model',
       toolCalls: [{ name: 'knowledge.search', resultCount: 1 }],
       sources: [{ id: 'source-1', title: 'Help', source: 'knowledge' }],
+      products: [{
+        externalProductId: 'merchant-1', name: 'Tea', productUrl: 'https://shop.example/tea',
+        images: ['https://shop.example/tea.jpg'], price: 2500, salePrice: 1800, currency: 'INR',
+      }],
     }));
     expect(sttTranscribe).toHaveBeenCalledWith(expect.objectContaining({
       language: 'auto',
       partial: false,
     }));
     expect(conversationCreate).toHaveBeenCalledWith(expect.objectContaining({ channel: 'voice' }));
+  });
+
+  it('uses a distinct idempotency request ID per spoken turn while preserving the merchant session', async () => {
+    const merchant = { integrationId: newUuidv7(), sessionId: 'merchant-visitor', origin: 'https://shop.example' };
+    const widgetId = widgetIdentity();
+    widgetId.widget!.merchant = merchant;
+    widgetId.permissions = ['products:read'];
+    await manager.begin(socket, widgetId, { language: 'en' });
+    for (let turn = 0; turn < 2; turn++) {
+      let calls = 0;
+      vad.detect.mockImplementation(async () => ({ speech: ++calls <= 5, probability: 0.99 }));
+      sttTranscribe.mockResolvedValue({ text: turn ? 'Add one more.' : 'Add this product to my cart.', language: 'en', isFinal: true });
+      for (let index = 0; index < 40; index++) {
+        manager.handleBinary(socket, frame(index, turn + 1));
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      await waitFor(() => sentEvents.filter(event => event.type === 'voice.assistant.epoch').length === turn + 1);
+    }
+    expect(agentInvoke).toHaveBeenCalledTimes(2);
+    const contexts = agentInvoke.mock.calls.map(call => call[1]);
+    expect(contexts[0].requestId).not.toBe(contexts[1].requestId);
+    const completed = sentEvents.filter(event => event.type === 'voice.assistant.turn.end');
+    for (let turn = 0; turn < 2; turn++) {
+      expect(contexts[turn]).toEqual(expect.objectContaining({
+        tenantId: widgetId.tenantId, assistantId, merchant, channel: 'widget', modality: 'voice',
+        requestId: (completed[turn].data as Record<string, unknown>).turnId,
+      }));
+    }
   });
 
   it('keeps processing microphone frames while final transcription is pending', async () => {
@@ -424,11 +604,124 @@ describe('VoiceSessionManager', () => {
         (event.data as Record<string, unknown>)?.hint === 'transcribing')).toBe(true);
       manager.handleBinary(socket, frame(39));
       await waitFor(() => calls === 40);
+      await waitFor(() => sentEvents.filter((e) => e.type === 'voice.audio.ack').length === 40);
+      expect(sentEvents.filter((e) => e.type === 'voice.audio.ack')
+        .map((e) => (e.data as Record<string, unknown>).sequence)).toEqual(Array.from({ length: 40 }, (_, i) => i));
+      expect(sttTranscribe.mock.calls[0][0].audio.data.length).toBe(39 * 640);
       expect(sentEvents.some((event) => (event.data as Record<string, unknown>)?.code === 'INGRESS_BACKPRESSURE')).toBe(false);
     } finally {
       release?.();
     }
     await waitFor(() => sentEvents.some((event) => event.type === 'voice.assistant.turn.end'));
+  });
+
+  it('does not acknowledge or leak a session when persistence completes after startup cancellation', async () => {
+    let release!: () => void;
+    persistence.create.mockImplementation(() => new Promise<void>((resolve) => { release = resolve; }));
+    const startup = new AbortController();
+    const beginning = manager.begin(socket, identity, { assistantId }, undefined, startup.signal);
+    const rejected = expect(beginning).rejects.toThrow('Voice startup cancelled.');
+    await waitFor(() => persistence.create.mock.calls.length === 1);
+    startup.abort();
+    release();
+    await rejected;
+    expect(manager.activeSessionCount).toBe(0);
+    expect(persistence.close).toHaveBeenCalledWith(expect.anything(), 'startup_cancelled', null);
+    expect(sentEvents.some((event) => event.type === 'voice.session.started')).toBe(false);
+    persistence.create.mockResolvedValue(undefined);
+    await beginSession();
+  });
+
+  it('pauses and resumes ingress for a slow VAD without reordering or dropping packets', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const received: number[] = [];
+    vad.detect.mockImplementation(async (request) => {
+      received.push(request.audio.data[0]);
+      if (received.length === 1) await pending;
+      return { speech: false, probability: 0 };
+    });
+
+    await beginSession();
+    try {
+      for (let i = 0; i < 6; i++) {
+        const packet = frame(i, 1, 3200);
+        packet.fill(i, 11);
+        manager.handleBinary(socket, packet);
+      }
+      expect(sentEvents.some((e) => e.type === 'voice.audio.flow' &&
+        (e.data as Record<string, unknown>).paused === true)).toBe(true);
+      expect(sentEvents.filter((e) => e.type === 'voice.audio.ack')).toHaveLength(0);
+      release();
+      await waitFor(() => sentEvents.filter((e) => e.type === 'voice.audio.ack').length === 6);
+      expect(received).toEqual(Array.from({ length: 30 }, (_, i) => Math.floor(i / 5)));
+      const lastAck = sentEvents.filter((e) => e.type === 'voice.audio.ack').at(-1)?.data;
+      expect(lastAck).toMatchObject({ paused: false, queueMs: 0, queueDepth: 0 });
+      expect(sentEvents.some((e) => (e.data as Record<string, unknown>)?.code === 'INGRESS_BACKPRESSURE')).toBe(false);
+    } finally {
+      release();
+    }
+  });
+
+  it('uses one batched VAD call per 100 ms packet while retaining all per-frame decisions', async () => {
+    vad.detectBatch = jest.fn().mockResolvedValue(Array.from({ length: 5 }, () => ({ speech: false, probability: 0 })));
+    await beginSession();
+    const packet = frame(0, 1, 3200);
+    manager.handleBinary(socket, packet);
+    await waitFor(() => sentEvents.some((e) => e.type === 'voice.audio.ack'));
+    expect(vad.detect).not.toHaveBeenCalled();
+    expect(vad.detectBatch).toHaveBeenCalledTimes(1);
+    expect(vad.detectBatch).toHaveBeenCalledWith(expect.objectContaining({
+      audio: expect.objectContaining({ data: packet.subarray(11) }),
+    }));
+  });
+
+  it('fails explicitly on queue overflow rather than feeding a truncated speech segment to STT', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    vad.detect.mockImplementation(async () => { await pending; return { speech: true, probability: 1 }; });
+    await beginSession();
+    try {
+      for (let i = 0; i < 21; i++) manager.handleBinary(socket, frame(i, 1, 3200));
+      expect(sentEvents.some((e) => (e.data as Record<string, unknown>)?.code === 'AUDIO_QUEUE_OVERFLOW')).toBe(true);
+      expect(sttTranscribe).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+  });
+
+  it('stops on global ingress overload instead of continuing with missing speech', async () => {
+    await beginSession();
+    Reflect.set(manager, 'ingressWindowStart', Date.now());
+    Reflect.set(manager, 'ingressWindowBytes', 4_000 * 1024);
+    manager.handleBinary(socket, frame(0, 1, 3200));
+    expect(sentEvents.some((event) => event.type === 'voice.session.error' &&
+      (event.data as Record<string, unknown>).code === 'INGRESS_BACKPRESSURE' &&
+      (event.data as Record<string, unknown>).recoverable === false)).toBe(true);
+    await waitFor(() => manager.activeSessionCount === 0);
+    expect(sttTranscribe).not.toHaveBeenCalled();
+    expect(vad.detect).not.toHaveBeenCalled();
+  });
+
+  it('waits for queued VAD before finalizing an explicit audio-end marker', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    vad.detect.mockImplementation(async () => { await pending; return { speech: true, probability: 1 }; });
+    const sessionId = await beginSession();
+    const packet = frame(0, 1, 3200);
+    packet.fill(7, 11);
+    try {
+      manager.handleBinary(socket, packet);
+      await manager.handleText(socket, JSON.stringify({
+        v: 1, type: 'voice.audio.end', ts: new Date().toISOString(), sessionId, data: {},
+      }));
+      expect(sttTranscribe).not.toHaveBeenCalled();
+      release();
+      await waitFor(() => sttTranscribe.mock.calls.length > 0);
+      expect(sttTranscribe.mock.calls[0][0].audio.data).toEqual(Buffer.alloc(3200, 7));
+    } finally {
+      release();
+    }
   });
 
   it('bounds captions, keeps one preview in flight, and cancels it for final transcription', async () => {
@@ -465,6 +758,7 @@ describe('VoiceSessionManager', () => {
       await manager.handleText(socket, JSON.stringify({
         v: 1, type: 'voice.audio.end', ts: new Date().toISOString(), sessionId, data: {},
       }));
+      await waitFor(() => sttTranscribe.mock.calls.some(([input]) => !input.partial));
       expect(request.signal.aborted).toBe(true);
       const final = sttTranscribe.mock.calls.find(([input]) => !input.partial)?.[0] as {
         audio: { data: Buffer }; partial: boolean;
@@ -476,6 +770,179 @@ describe('VoiceSessionManager', () => {
     }
     await waitFor(() => sentEvents.some((event) => event.type === 'voice.assistant.turn.end'));
     expect(sentEvents.some((event) => event.type === 'voice.transcript.partial')).toBe(false);
+  });
+
+  it('does not duplicate inference with previews on a non-cancellable batch STT provider', async () => {
+    Object.defineProperty(stt, 'supportsPartial', { value: false });
+    vad.detect.mockResolvedValue({ speech: true, probability: 0.99 });
+    const sessionId = await beginSession();
+    for (let index = 0; index < 8; index++) {
+      manager.handleBinary(socket, frame(index, 1, 12800));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 20);
+    }
+    expect(sttTranscribe).not.toHaveBeenCalled();
+    await manager.handleText(socket, JSON.stringify({
+      v: 1, type: 'voice.audio.end', ts: new Date().toISOString(), sessionId, data: {},
+    }));
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(sttTranscribe).toHaveBeenCalledTimes(1);
+    expect(sttTranscribe.mock.calls[0][0].partial).toBe(false);
+    const speech = sentEvents.find(event => event.type === 'voice.speech.started');
+    const final = sentEvents.find(event => event.type === 'voice.transcript.final');
+    const response = sentEvents.find(event => event.type === 'voice.assistant.response');
+    const end = sentEvents.find(event => event.type === 'voice.assistant.audio.end');
+    if (!speech || !final || !response || !end) throw new Error('Expected all correlated voice stages.');
+    const turnId = (speech.data as Record<string, unknown>).turnId;
+    expect((final.data as Record<string, unknown>).turnId).toBe(turnId);
+    expect((final.data as Record<string, unknown>).buffering).toEqual({
+      preRollMs: 0, trailingSilenceMs: 0, vadSpeechMs: 3200, reason: 'client_end',
+    });
+    expect((final.data as Record<string, unknown>).audioDiagnostics).toBeUndefined();
+    expect((response.data as Record<string, unknown>).turnId).toBe(turnId);
+    expect((end.data as Record<string, unknown>).timing).toEqual(expect.objectContaining({
+      sttMs: expect.any(Number), agentMs: expect.any(Number),
+      ttsGenerationMs: expect.any(Number), ttsRealTimeFactor: expect.any(Number),
+    }));
+  });
+
+  it('preserves every preroll, speech and trailing sample through endpointing into final STT', async () => {
+    const previous = process.env.MCZEN_AUDIO_DIAGNOSTICS;
+    process.env.MCZEN_AUDIO_DIAGNOSTICS = 'metadata';
+    try {
+      Object.defineProperty(stt, 'supportsPartial', { value: false });
+      let decisions = 0;
+      vad.detect.mockImplementation(async () => ({
+        speech: ++decisions > 5 && decisions <= 10, probability: 0.9,
+      }));
+      await beginSession();
+      const expected: Buffer[] = [];
+      for (let index = 0; index < 9; index++) {
+        const packet = frame(index, 1, 3200);
+        for (let offset = 11; offset < packet.length; offset += 2) {
+          packet.writeInt16LE((index * 5 + Math.floor((offset - 11) / 640)) * 100, offset);
+        }
+        expected.push(packet.subarray(11));
+        manager.handleBinary(socket, packet);
+        await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
+      }
+      await waitFor(() => sentEvents.some(event => event.type === 'voice.transcript.final'));
+      expect(sttTranscribe).toHaveBeenCalledTimes(1);
+      expect(sttTranscribe.mock.calls[0][0].audio.data.equals(Buffer.concat(expected))).toBe(true);
+      expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
+        audioMs: 900,
+        buffering: { preRollMs: 100, trailingSilenceMs: 700, vadSpeechMs: 100, reason: 'silence' },
+        audioDiagnostics: expect.objectContaining({
+          finalStt: expect.objectContaining({ samples: 14400, audioMs: 900, clippingPercent: 0 }),
+          ingress: expect.objectContaining({ packets: 9, missingPackets: 0, reorderedPackets: 0 }),
+        }),
+      }));
+    } finally {
+      if (previous === undefined) delete process.env.MCZEN_AUDIO_DIAGNOSTICS;
+      else process.env.MCZEN_AUDIO_DIAGNOSTICS = previous;
+    }
+  });
+
+  it('preserves a low-quality transcript but asks to repeat without invoking shopping or agent tools', async () => {
+    sttTranscribe.mockResolvedValue({
+      text: 'Open mic heart.', language: 'en', isFinal: true,
+      recognitionQuality: { reliable: false, reason: 'low_log_probability', avgLogProbability: -1.2 },
+    });
+    await beginSession();
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
+      text: 'Open mic heart.', recognitionQuality: expect.objectContaining({ reliable: false }),
+    }));
+    expect(sentEvents.find(event => event.type === 'voice.assistant.response')?.data).toEqual(expect.objectContaining({
+      answer: 'I could not hear that clearly. Please repeat your request.',
+    }));
+    expect(agentInvoke).not.toHaveBeenCalled();
+    expect(tts.synthesize).toHaveBeenCalled();
+  });
+  it('retains raw STT text separately and never renames a product during whitespace normalization', async () => {
+    sttTranscribe.mockResolvedValue({ text: '  Explain  ZENAGE.\n', language: 'en', isFinal: true });
+    await beginSession();
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(sentEvents.find(event => event.type === 'voice.transcript.final')?.data).toEqual(expect.objectContaining({
+      rawText: '  Explain  ZENAGE.\n', text: 'Explain ZENAGE.',
+    }));
+    expect(agentInvoke).toHaveBeenCalledWith('Explain ZENAGE.', expect.anything(), expect.any(AbortSignal));
+  });
+
+  it('cancels a disconnected session VAD request and ignores its late failure without a recovery error', async () => {
+    let activeSignal: AbortSignal | undefined;
+    vad.detectBatch = jest.fn().mockImplementation(request => new Promise((_resolve, reject) => {
+      activeSignal = request.signal;
+      request.signal.addEventListener('abort', () => reject(new VoiceProviderError('VOICE_PROVIDER_TIMEOUT')), { once: true });
+    }));
+    await beginSession();
+    manager.handleBinary(socket, frame(0, 1, 3200));
+    await waitFor(() => activeSignal !== undefined);
+    manager.onDisconnect(socket);
+    expect(activeSignal?.aborted).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(sentEvents.some(event => event.type === 'voice.session.error')).toBe(false);
+    expect(sttTranscribe).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('reports a TTS failure accurately and recovers its own session (after chunk: %s)', async afterChunk => {
+    tts.synthesize.mockImplementation(async function* () {
+      if (afterChunk) yield { encoding: 'pcm_s16le', sampleRate: 16000, data: Buffer.alloc(640) };
+      throw new Error('Provider failed');
+    });
+    await beginSession();
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.session.error'));
+    const error = sentEvents.find(event => event.type === 'voice.session.error');
+    expect(error?.data).toEqual(expect.objectContaining({ code: 'TTS_UNAVAILABLE', recoverable: true }));
+    expect(manager.activeSessionCount).toBe(1);
+    expect(sentEvents.some(event => event.type === 'voice.assistant.epoch')).toBe(true);
+  });
+
+  it('keeps decimal prices and product acronyms intact and bounds every TTS segment', async () => {
+    const answer = `HALE.O costs 10.50 Indian rupees. ${'Stored product information '.repeat(30).trim()}`;
+    agentInvoke.mockResolvedValue({ success: true, answer, model: 'verified-catalogue', toolCalls: [], sources: [] });
+    await beginSession();
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    await waitFor(() => sentEvents.some((event) => event.type === 'voice.assistant.turn.end'));
+    const segments = tts.synthesize.mock.calls.map(([request]) => request.text);
+    expect(segments[0]).toBe('HALE.O costs 10.50 Indian rupees.');
+    expect(segments.every((segment) => segment.length <= 500)).toBe(true);
+    expect(segments.join(' ')).toBe(answer);
+  });
+  it('starts TTS for a streamed completed sentence before the agent finishes, then sends the final response once', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    agent.stream = jest.fn().mockImplementation(async function* () {
+      yield { text: 'ZENAGE product information.' };
+      await pending;
+      yield { response: { success: true, answer: 'ZENAGE product information.', model: 'gpu',
+        toolCalls: [{ name: 'get_product_details', resultCount: 1 }], sources: [] } };
+    });
+    await beginSession();
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    await waitFor(() => tts.synthesize.mock.calls.length > 0);
+    expect(sentEvents.some(event => event.type === 'voice.assistant.turn.end')).toBe(false);
+    finish();
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    expect(sentEvents.filter(event => event.type === 'voice.assistant.response')).toHaveLength(1);
+    expect(sentEvents.find(event => event.type === 'voice.assistant.response')?.data).toEqual(
+      expect.objectContaining({ answer: 'ZENAGE product information.', model: 'gpu' }));
+  });
+
+  it('reports a failed streamed agent answer as an agent error, not a Piper error', async () => {
+    agent.stream = jest.fn().mockImplementation(async function* () {
+      yield { text: 'Partial product information.' };
+      yield { response: { success: false, answer: 'The provider stream failed.', model: 'gpu', toolCalls: [], sources: [] } };
+    });
+    await beginSession();
+    for (let index = 0; index < 40; index++) manager.handleBinary(socket, frame(index));
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.session.error'));
+    expect(sentEvents.find(event => event.type === 'voice.session.error')?.data).toEqual(
+      expect.objectContaining({ code: 'AGENT_UNAVAILABLE' }));
+    expect(sentEvents.some(event => event.type === 'voice.assistant.turn.end')).toBe(false);
   });
 
   it('aborts stale TTS on interruption and never emits an old-epoch audio end', async () => {

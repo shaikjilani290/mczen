@@ -1,4 +1,8 @@
+export type LlmProvider = 'ollama' | 'openai-compatible';
 export interface AgentRuntimeConfig {
+    readonly llmProvider: LlmProvider;
+    readonly llmBaseUrl: string;
+    readonly llmModel: string;
     readonly ollamaBaseUrl: string;
     readonly ollamaModel: string;
     readonly ollamaTimeoutMs: number;

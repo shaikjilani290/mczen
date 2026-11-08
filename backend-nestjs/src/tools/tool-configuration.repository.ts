@@ -348,6 +348,36 @@ export class ToolConfigurationRepository extends TenantScopedRepository<ObjectLi
     );
   }
 
+  async enableWebsiteTools(
+    manager: EntityManager,
+    assistantId: string,
+    actorId: string,
+    names: readonly string[],
+  ): Promise<void> {
+    const { binary } = this.tenant();
+    const assistantBinary = uuidToBinary(assistantId);
+    const assistant = await this.run(
+      'SELECT 1 FROM `assistants` WHERE `id`=? AND `tenant_id`=? AND `status`=\'active\' AND `deleted_at` IS NULL',
+      [assistantBinary, binary],
+      manager,
+    );
+    if (!assistant[0]) throw new NotFoundException('Assistant not found.');
+    const actorBinary = uuidToBinary(actorId);
+    for (const name of names) {
+      const toolId = await this.toolId(manager, name);
+      await manager.query(
+        `INSERT INTO \`tenant_tools\` (\`id\`,\`tenant_id\`,\`tool_id\`,\`enabled\`,\`extra_permissions\`,\`max_calls_per_conversation\`,\`updated_by\`)
+         VALUES (?,?,?,1,NULL,NULL,?) ON DUPLICATE KEY UPDATE \`enabled\`=1,\`updated_by\`=VALUES(\`updated_by\`)`,
+        [uuidToBinary(newUuidv7()), binary, toolId, actorBinary],
+      );
+      await manager.query(
+        `INSERT INTO \`assistant_tools\` (\`tenant_id\`,\`assistant_id\`,\`tool_id\`,\`enabled\`)
+         VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE \`enabled\`=1`,
+        [binary, assistantBinary, toolId],
+      );
+    }
+  }
+
   async secretStatus(name: string): Promise<{ configured: boolean; lastRotatedAt: Date | null; expiresAt: Date | null }> {
     const { binary } = this.tenant();
     const rows = await this.run(

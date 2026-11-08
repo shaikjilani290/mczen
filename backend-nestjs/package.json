@@ -25,7 +25,8 @@
     "migration:show": "npm run -s typeorm:cli -- migration:show -d src/database/data-source.ts",
     "migration:check": "ts-node -r tsconfig-paths/register src/database/scripts/migration-check.ts",
     "database:check": "ts-node -r tsconfig-paths/register src/database/scripts/database-check.ts",
-    "seed:demo": "ts-node -r tsconfig-paths/register scripts/demo-owner-seed.ts"
+    "seed:demo": "ts-node -r tsconfig-paths/register scripts/demo-owner-seed.ts",
+    "verify:live-integration": "ts-node -r tsconfig-paths/register scripts/verify-live-integration.ts"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

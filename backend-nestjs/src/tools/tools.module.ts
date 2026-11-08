@@ -8,9 +8,10 @@ import { ToolConfigurationRepository } from './tool-configuration.repository';
 import { ToolSecretCipher } from './tool-secret-cipher';
 import { ToolsController } from './tools.controller';
 import { ToolsService } from './tools.service';
+import { WebsiteDataModule } from '../website-integrations/website-data.module';
 
 @Module({
-  imports: [KnowledgeModule],
+  imports: [KnowledgeModule, WebsiteDataModule],
   controllers: [ToolsController],
   providers: [
     KnowledgeService,

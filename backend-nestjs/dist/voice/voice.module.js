@@ -14,6 +14,7 @@ const conversations_module_1 = require("../conversations/conversations.module");
 const agent_invocation_adapter_1 = require("./agent-invocation.adapter");
 const agent_invocation_port_1 = require("./agent-invocation.port");
 const faster_whisper_adapter_1 = require("./stt/faster-whisper.adapter");
+const configured_stt_adapter_1 = require("./stt/configured-stt.adapter");
 const stt_port_1 = require("./stt/stt.port");
 const silero_vad_adapter_1 = require("./vad/silero-vad.adapter");
 const vad_port_1 = require("./vad/vad.port");
@@ -27,15 +28,19 @@ const voice_ticket_controller_1 = require("./voice-ticket.controller");
 const voice_capabilities_controller_1 = require("./voice-capabilities.controller");
 const voice_ticket_service_1 = require("./voice-ticket.service");
 const widget_voice_service_1 = require("./widget-voice.service");
+const voice_library_service_1 = require("./voice-library.service");
+const voice_library_controller_1 = require("./voice-library.controller");
+const website_data_module_1 = require("../website-integrations/website-data.module");
 let VoiceModule = class VoiceModule {
 };
 exports.VoiceModule = VoiceModule;
 exports.VoiceModule = VoiceModule = __decorate([
     (0, common_1.Module)({
-        imports: [agent_module_1.AgentModule, auth_module_1.AuthModule, conversations_module_1.ConversationsModule],
-        controllers: [voice_ticket_controller_1.VoiceTicketController, voice_capabilities_controller_1.VoiceCapabilitiesController],
+        imports: [agent_module_1.AgentModule, auth_module_1.AuthModule, conversations_module_1.ConversationsModule, website_data_module_1.WebsiteDataModule],
+        controllers: [voice_ticket_controller_1.VoiceTicketController, voice_capabilities_controller_1.VoiceCapabilitiesController, voice_library_controller_1.VoiceLibraryController],
         exports: [widget_voice_service_1.WidgetVoiceService],
         providers: [
+            voice_library_service_1.VoiceLibraryService,
             widget_voice_service_1.WidgetVoiceService,
             voice_auth_service_1.VoiceAuthService,
             voice_session_repository_1.VoiceSessionRepository,
@@ -43,10 +48,11 @@ exports.VoiceModule = VoiceModule = __decorate([
             voice_session_manager_1.VoiceSessionManager,
             voice_gateway_1.VoiceGateway,
             faster_whisper_adapter_1.FasterWhisperAdapter,
+            configured_stt_adapter_1.ConfiguredSttAdapter,
             silero_vad_adapter_1.SileroVadAdapter,
             piper_adapter_1.PiperAdapter,
             agent_invocation_adapter_1.AgentInvocationAdapter,
-            { provide: stt_port_1.SPEECH_TO_TEXT, useExisting: faster_whisper_adapter_1.FasterWhisperAdapter },
+            { provide: stt_port_1.SPEECH_TO_TEXT, useExisting: configured_stt_adapter_1.ConfiguredSttAdapter },
             { provide: vad_port_1.VOICE_ACTIVITY, useExisting: silero_vad_adapter_1.SileroVadAdapter },
             { provide: tts_port_1.TEXT_TO_SPEECH, useExisting: piper_adapter_1.PiperAdapter },
             { provide: agent_invocation_port_1.AGENT_INVOCATION, useExisting: agent_invocation_adapter_1.AgentInvocationAdapter },

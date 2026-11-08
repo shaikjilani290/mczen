@@ -180,7 +180,7 @@ export function ArticleEditor({ id, go }) {
   if (id && existing.error) return <Banner error={existing.error} />;
   const lang = form.language;
   return (
-    <section className="ad-form">
+    <section className="ad-form ad-box">
       <Banner error={error} />
       {saved && <div className="ad-ok" role="status">{saved}</div>}
       <label>Title<input value={form.title} lang={lang} maxLength={200} onChange={set("title")} /></label>

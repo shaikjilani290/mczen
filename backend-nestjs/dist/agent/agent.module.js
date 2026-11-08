@@ -16,12 +16,13 @@ const tool_audit_service_1 = require("./tools/tool-audit.service");
 const tool_executor_service_1 = require("./tools/tool-executor.service");
 const tools_module_1 = require("../tools/tools.module");
 const conversations_module_1 = require("../conversations/conversations.module");
+const website_data_module_1 = require("../website-integrations/website-data.module");
 let AgentModule = class AgentModule {
 };
 exports.AgentModule = AgentModule;
 exports.AgentModule = AgentModule = __decorate([
     (0, common_1.Module)({
-        imports: [tools_module_1.ToolsModule, conversations_module_1.ConversationsModule],
+        imports: [tools_module_1.ToolsModule, conversations_module_1.ConversationsModule, website_data_module_1.WebsiteDataModule],
         controllers: [agent_controller_1.AgentController],
         providers: [
             agent_service_1.AgentService,

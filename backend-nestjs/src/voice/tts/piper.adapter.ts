@@ -38,10 +38,24 @@ export class PiperAdapter implements TextToSpeechPort {
 
   async *synthesize(request: TtsRequest): AsyncIterable<TtsAudioChunk> {
     if (!this.supports(request.language) || !this.supportsVoice(request.language, request.voice) ||
-        request.text.length === 0 || request.text.length > 2_000 ||
+        request.text.trim().length === 0 || request.text.length > 2_000 ||
         !Number.isFinite(request.rate) || request.rate < 0.5 || request.rate > 2) {
       throw new VoiceProviderError('VOICE_PROVIDER_INVALID');
     }
+    // Piper emits its first audio only after a whole sentence is synthesized.
+    // Bound inference per request, including slower configured speech rates.
+    const limit = Math.floor(120 * Math.min(request.rate, 1));
+    let text = request.text.trim();
+    while (text.length > limit) {
+      const space = text.lastIndexOf(' ', limit);
+      const boundary = space > 0 ? space : limit;
+      yield* this.synthesizeSegment({ ...request, text: text.slice(0, boundary) });
+      text = text.slice(boundary).trimStart();
+    }
+    if (text) yield* this.synthesizeSegment({ ...request, text });
+  }
+
+  private async *synthesizeSegment(request: TtsRequest): AsyncIterable<TtsAudioChunk> {
     const release = await this.slots.acquire(request.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
@@ -71,7 +85,7 @@ export class PiperAdapter implements TextToSpeechPort {
       let carry = Buffer.alloc(0);
       while (true) {
         if (request.signal.aborted) throw new VoiceProviderError('VOICE_PROVIDER_TIMEOUT');
-        const { done, value } = await reader.read();
+        const { done, value } = await this.readChunk(reader, request.signal);
         if (done) break;
         total += value.byteLength;
         if (total > MAX_TTS_BYTES) throw new VoiceProviderError('VOICE_PROVIDER_INVALID');
@@ -93,6 +107,21 @@ export class PiperAdapter implements TextToSpeechPort {
         reader.releaseLock();
       }
       release();
+    }
+  }
+
+  private async readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) {
+    let rejectWait: (error: VoiceProviderError) => void = () => {};
+    const cancelled = new Promise<never>((_resolve, reject) => { rejectWait = reject; });
+    const onAbort = () => rejectWait(new VoiceProviderError('VOICE_PROVIDER_TIMEOUT'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(onAbort, 12_000);
+    if (signal.aborted) onAbort();
+    try {
+      return await Promise.race([reader.read(), cancelled]);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
     }
   }
 

@@ -7,6 +7,15 @@ import { VoiceClient } from "../voice/voiceClient.js";
 const env = { navigator: { mediaDevices: { getUserMedia() {} } }, AudioContext: class {}, WebSocket: class {} };
 const voiceCaps = { available: true, speechLanguages: ["en", "hi"], textOnlyLanguages: ["te"] };
 
+test("voice diagnostics distinguish missing engines, assistant settings and browser restrictions", () => {
+  assert.match(voiceSupport({ available: false, diagnostics: { unavailable: ["stt", "tts"] } }, "en", env).reason, /STT, TTS/);
+  assert.match(voiceSupport({ available: false, diagnostics: { reason: "assistant_settings_unavailable" } }, "en", env).reason, /assistant/);
+  assert.match(voiceSupport(voiceCaps, "en", { ...env, isSecureContext: false }).reason, /HTTPS/);
+  assert.match(voiceSupport(voiceCaps, "en", {
+    ...env, document: { permissionsPolicy: { allowsFeature: () => false } },
+  }).reason, /Permissions-Policy/);
+});
+
 test("voice support follows backend capabilities, with Telugu text-only", () => {
   assert.equal(voiceSupport(voiceCaps, "en", env).ok, true);
   assert.equal(voiceSupport(voiceCaps, "hi", env).ok, true);
@@ -53,6 +62,21 @@ test("voiceTicket maps 403 and 429 to safe errors", async () => {
   }
 });
 
+test("voiceTicket forwards startup cancellation to connect and ticket fetches", async () => {
+  const signals = [];
+  const client = createWidgetClient({
+    apiBase: "https://m.test", publicKey: "wk_x",
+    fetchImpl: async (url, init) => {
+      signals.push(init.signal);
+      return { ok: true, json: async () => url.endsWith("/session")
+        ? { sessionToken: "s1", config: {} } : { ticket: "mzt_x" } };
+    },
+  });
+  const controller = new AbortController();
+  await client.voiceTicket({ signal: controller.signal });
+  assert.deepEqual(signals, [controller.signal, controller.signal]);
+});
+
 class FakeVoiceClient {
   static instances = [];
   constructor(options) { this.options = options; this.stopped = 0; this.interrupted = 0; FakeVoiceClient.instances.push(this); }
@@ -64,19 +88,62 @@ class FakeVoiceClient {
 function harness() {
   FakeVoiceClient.instances = [];
   FakeVoiceClient.failWith = null;
-  const log = { states: [], partials: [], finals: [], responses: [], errors: [] };
+  const log = { states: [], partials: [], finals: [], responses: [], deltas: [], errors: [], cartActivity: [] };
   const voice = createWidgetVoice({
-    client: { voiceTicket: async () => ({ ticket: "mzt_x" }) },
+    client: { voiceTicket: async () => ({ ticket: "mzt_x" }), setVoiceActive: active => log.cartActivity.push(active) },
     apiBase: "https://m.test",
     VoiceClientImpl: FakeVoiceClient,
     onState: (s) => log.states.push(s),
     onPartial: (t) => log.partials.push(t),
     onFinal: (t) => log.finals.push(t),
-    onResponse: (a, s) => log.responses.push([a, s]),
+    onResponse: (a, s, p) => log.responses.push([a, s, p]),
+    onDelta: text => log.deltas.push(text),
     onError: (m) => log.errors.push(m),
   });
   return { voice, log };
 }
+
+test("delivers streamed text only for active-session streamed events, without duplicating ordinary responses", async () => {
+  const { voice, log } = harness();
+  await voice.start("en");
+  const active = FakeVoiceClient.instances.at(-1);
+  active.options.onEvent({ type: "voice.assistant.text.delta", data: { delta: "Ordinary sentence." } });
+  active.options.onEvent({ type: "voice.assistant.text.delta", data: { delta: "ZENAGE details.", streamed: true } });
+  assert.deepEqual(log.deltas, ["ZENAGE details."]);
+  await voice.stop();
+  active.options.onEvent({ type: "voice.assistant.text.delta", data: { delta: "Stale sentence.", streamed: true } });
+  assert.deepEqual(log.deltas, ["ZENAGE details."]);
+});
+
+test("audio metadata requires local opt-in and survives cart navigation only for that widget lifetime", async (t) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "location", {
+    configurable: true, value: { hostname: "127.0.0.1", search: "?mczenAudioDiagnostics=metadata" },
+  });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "location", original);
+    else delete globalThis.location;
+  });
+  const { voice } = harness();
+  await voice.start("en");
+  assert.equal(FakeVoiceClient.instances.at(-1).options.audioDiagnostics, true);
+  await voice.stop();
+  globalThis.location.search = "";
+  await voice.start("en");
+  assert.equal(FakeVoiceClient.instances.at(-1).options.audioDiagnostics, true);
+  await voice.stop();
+  const fresh = harness();
+  await fresh.voice.start("en");
+  assert.equal(FakeVoiceClient.instances.at(-1).options.audioDiagnostics, false);
+  await fresh.voice.stop();
+  globalThis.location.hostname = "merchant.example";
+  globalThis.location.search = "?mczenAudioDiagnostics=metadata";
+  const remote = harness();
+  await remote.voice.start("en");
+  assert.equal(FakeVoiceClient.instances.at(-1).options.audioDiagnostics, false);
+  await remote.voice.stop();
+  assert.equal(new VoiceClient({ audioDiagnostics: true }).audioDiagnostics, false);
+});
 
 test("only one voice session may be active; concurrent starts are ignored", async () => {
   const { voice } = harness();
@@ -87,6 +154,28 @@ test("only one voice session may be active; concurrent starts are ignored", asyn
   assert.deepEqual(FakeVoiceClient.instances[0].started, { token: null, opts: { language: "en" } });
 });
 
+test("cart delivery follows voice lifecycle, including reconnect, errors and stop", async () => {
+  const { voice, log } = harness();
+  await voice.start("en");
+  const instance = FakeVoiceClient.instances[0];
+  instance.options.onState("reconnecting");
+  instance.options.onState("error");
+  await voice.stop();
+  assert.deepEqual(log.cartActivity, [true, true, false, false]);
+  instance.options.onState("listening");
+  assert.equal(log.cartActivity.at(-1), false, "stale stopped sessions cannot reactivate cart polling");
+});
+
+test("passes the selected voice through the existing voice session without changing language or tickets", async () => {
+  const { voice } = harness();
+  await voice.start("en", "en_GB-alba-medium");
+  assert.deepEqual(FakeVoiceClient.instances[0].started, {
+    token: null, opts: { language: "en", voiceId: "en_GB-alba-medium" },
+  });
+  assert.deepEqual(await FakeVoiceClient.instances[0].options.ticketProvider({}), "mzt_x");
+  await voice.stop();
+});
+
 test("transcripts and responses are forwarded; events after stop are ignored", async () => {
   const { voice, log } = harness();
   await voice.start("hi");
@@ -95,13 +184,25 @@ test("transcripts and responses are forwarded; events after stop are ignored", a
   onEvent({ type: "voice.transcript.final", data: { text: "namaste" } });
   onEvent({ type: "voice.assistant.response", data: { answer: "hello", sources: [{ title: "a" }] } });
   assert.deepEqual(log.finals, ["namaste"]);
-  assert.deepEqual(log.responses, [["hello", [{ title: "a" }]]]);
+  assert.deepEqual(log.responses, [["hello", [{ title: "a" }], []]]);
   await voice.stop();
   onEvent({ type: "voice.assistant.response", data: { answer: "stale" } });
   assert.equal(log.responses.length, 1);
   assert.equal(FakeVoiceClient.instances[0].stopped, 1);
   assert.equal(voice.isActive(), false);
   assert.equal(log.states.at(-1), "idle");
+});
+
+test("voice assistant responses forward structured product cards", async () => {
+  const { voice, log } = harness();
+  await voice.start("en");
+  const product = { name: "Tea", productUrl: "https://shop.example/tea", images: ["https://shop.example/tea.jpg"] };
+  FakeVoiceClient.instances[0].options.onEvent({
+    type: "voice.assistant.response",
+    data: { answer: "Tea is available.", sources: [], products: [product] },
+  });
+  assert.deepEqual(log.responses, [["Tea is available.", [], [product]]]);
+  await voice.stop();
 });
 
 test("interrupt reaches the active client; stop releases it for a fresh start", async () => {

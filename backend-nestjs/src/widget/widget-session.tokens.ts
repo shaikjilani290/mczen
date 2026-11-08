@@ -5,6 +5,8 @@ export interface WidgetSessionClaims {
   /** assistant id */ a: string;
   /** conversation id once the first turn has started */ c?: string;
   /** stable anonymous session id, preserved across token refreshes; binds voice tickets */ s?: string;
+  /** Website integration id for the restricted website SDK session. */ i?: string;
+  /** Digest of the public integration key, invalidated on key rotation. */ k?: string;
   /** embedding origin the session was issued to */ o: string;
   /** sliding expiry (epoch ms) */ e: number;
   /** absolute expiry (epoch ms) */ m: number;
@@ -48,7 +50,9 @@ export class WidgetSessionTokens {
       const now = this.now();
       if (typeof claims.t !== 'string' || typeof claims.a !== 'string' || typeof claims.o !== 'string' ||
           typeof claims.e !== 'number' || typeof claims.m !== 'number' || claims.e <= now || claims.m <= now ||
-          (claims.s !== undefined && (typeof claims.s !== 'string' || !/^[0-9a-f-]{36}$/.test(claims.s)))) return undefined;
+          (claims.s !== undefined && (typeof claims.s !== 'string' || !/^[0-9a-f-]{36}$/.test(claims.s))) ||
+          (claims.i !== undefined && (typeof claims.i !== 'string' || !/^[0-9a-f-]{36}$/.test(claims.i))) ||
+          (claims.k !== undefined && (typeof claims.k !== 'string' || !/^[a-f0-9]{64}$/.test(claims.k)))) return undefined;
       return claims;
     } catch {
       return undefined;

@@ -15,6 +15,7 @@ var VoiceSessionManager_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.VoiceSessionManager = exports.MAX_TENANT_SESSIONS = exports.MAX_GLOBAL_SESSIONS = exports.MAX_SESSION_MS = void 0;
 const common_1 = require("@nestjs/common");
+const product_identity_service_1 = require("../website-integrations/product-identity.service");
 const node_crypto_1 = require("node:crypto");
 const node_v8_1 = require("node:v8");
 const ws_1 = require("ws");
@@ -25,13 +26,16 @@ const agent_invocation_port_1 = require("./agent-invocation.port");
 const shared_state_1 = require("../shared-state/shared-state");
 const voice_auth_service_1 = require("./voice-auth.service");
 const voice_session_repository_1 = require("./voice-session.repository");
+const voice_provider_util_1 = require("./voice-provider.util");
 const stt_port_1 = require("./stt/stt.port");
 const vad_port_1 = require("./vad/vad.port");
 const tts_port_1 = require("./tts/tts.port");
+const voice_library_service_1 = require("./voice-library.service");
+const audio_diagnostics_1 = require("./audio-diagnostics");
 const HEADER_BYTES = 11;
 const MAX_PAYLOAD_BYTES = 14_400;
 const MAX_MESSAGE_BYTES = 64 * 1024;
-const MAX_UTTERANCE_BYTES = 20 * 1024 * 1024;
+const MAX_UTTERANCE_BYTES = 640_000;
 const MAX_SESSION_AUDIO_BYTES = 20 * 1024 * 1024;
 exports.MAX_SESSION_MS = 60 * 60_000;
 const RESUME_TTL_MS = 120_000;
@@ -56,11 +60,13 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
     tts;
     agent;
     store;
+    library;
+    productIdentity;
     logger = new common_1.Logger(VoiceSessionManager_1.name);
     sessions = new Map();
     ingressWindowStart = Date.now();
     ingressWindowBytes = 0;
-    constructor(auth, persistence, conversations, stt, vad, tts, agent, store) {
+    constructor(auth, persistence, conversations, stt, vad, tts, agent, store, library, productIdentity) {
         this.auth = auth;
         this.persistence = persistence;
         this.conversations = conversations;
@@ -69,14 +75,27 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         this.tts = tts;
         this.agent = agent;
         this.store = store;
+        this.library = library;
+        this.productIdentity = productIdentity;
     }
-    async begin(socket, identity, input, userAgent) {
+    async begin(socket, identity, input, userAgent, signal) {
+        const since = performance.now();
+        const diagnose = (stage) => {
+            this.logger.log({ event: 'voice_session_start_stage', stage, elapsedMs: Math.round(performance.now() - since) });
+        };
+        const checkStartup = () => {
+            if (signal?.aborted || socket.readyState !== ws_1.WebSocket.OPEN)
+                throw new Error('Voice startup cancelled.');
+        };
+        checkStartup();
+        diagnose('resolving_identity');
         rejectUnknownFields(input, ['assistantId', 'conversationId', 'language', 'resumeToken', 'lastEpoch', 'audioFormat', 'voiceId']);
         if (input.audioFormat !== undefined && input.audioFormat !== 'pcm_s16le/16000/mono') {
             return this.fail(socket, 'AUDIO_FORMAT_MISMATCH', 'Only 16 kHz mono PCM16 audio is supported.', 4410);
         }
         if (typeof input.resumeToken === 'string') {
-            await this.resume(socket, identity, input.resumeToken, input.lastEpoch);
+            diagnose('resuming_session');
+            await this.resume(socket, identity, input.resumeToken, input.lastEpoch, signal);
             return;
         }
         const widget = identity.widget;
@@ -91,15 +110,31 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         }
         const language = parseLanguage(input.language);
         const { settings, allowedLanguages, ttsLanguages, defaultLanguage } = await this.auth.resolveSettings(identity.tenantId, assistantId, language);
+        checkStartup();
+        diagnose('settings_resolved');
         if (input.voiceId !== undefined) {
             const selectedLanguage = language === 'auto' ? defaultLanguage : language;
-            if (typeof input.voiceId !== 'string' || !this.tts.supportsVoice(selectedLanguage, input.voiceId)) {
+            if (typeof input.voiceId === 'string' && input.voiceId.startsWith('clone:') && this.library) {
+                await this.library.assertActive(identity.tenantId, input.voiceId, selectedLanguage);
+            }
+            else if (typeof input.voiceId !== 'string' || !this.tts.supportsVoice(selectedLanguage, input.voiceId)) {
                 return this.fail(socket, 'INVALID_VOICE', 'The selected voice is unavailable.', 4410);
             }
             settings.ttsVoice = input.voiceId;
         }
         if (language === 'auto' && allowedLanguages.length === 0) {
             throw new common_1.ForbiddenException('Voice is not enabled for this assistant.');
+        }
+        if (widget) {
+            const disconnected = [...this.sessions.values()].filter(session => !session.socket && session.state !== 'closed' &&
+                session.context.agent.tenantId === identity.tenantId &&
+                session.context.widgetSessionId === widget.widgetSessionId &&
+                session.context.assistantId === assistantId &&
+                session.context.conversationId === widget.conversationId);
+            for (const previous of disconnected) {
+                await this.runInTenant(previous, () => this.closeSession(previous, 'disconnected_session_replaced'));
+            }
+            checkStartup();
         }
         if (this.sessions.size >= exports.MAX_GLOBAL_SESSIONS ||
             process.memoryUsage().heapUsed > (0, node_v8_1.getHeapStatistics)().heap_size_limit * 0.7) {
@@ -110,6 +145,8 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             this.vad.healthCheck(),
             this.tts.healthCheck(),
         ]);
+        checkStartup();
+        diagnose('health_checked');
         if (!sttReady || !vadReady || !ttsReady) {
             return this.fail(socket, 'VOICE_ENGINE_UNAVAILABLE', 'A required voice engine is unavailable.', 4503);
         }
@@ -133,6 +170,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         const agentContext = Object.freeze({
             tenantId: identity.tenantId,
             ...(identity.widget ? { channel: 'widget' } : { userId: identity.userId }),
+            ...(identity.widget?.merchant ? { merchant: identity.widget.merchant } : {}),
             assistantId,
             permissions: identity.permissions,
             requestId: (0, node_crypto_1.randomUUID)(),
@@ -182,11 +220,17 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             lastNudgeAt: Date.now(),
         };
         session.slotScopes = slotScopes;
+        const releaseOnCancel = () => { void this.releaseSlots(sessionId, slotScopes); };
+        signal?.addEventListener('abort', releaseOnCancel, { once: true });
         try {
+            checkStartup();
+            diagnose('slots_acquired');
             await this.runInTenant(session, async () => {
                 let conversationId;
                 if (typeof requestedConversationId === 'string') {
                     const prepared = await this.conversations.prepareAgentTurn(requestedConversationId, agentContext);
+                    checkStartup();
+                    diagnose('conversation_authorized');
                     if (prepared.assistantId !== assistantId) {
                         throw new common_1.ForbiddenException('Conversation access is unavailable.');
                     }
@@ -197,10 +241,16 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                     throw new common_1.ForbiddenException('Conversation access is unavailable.');
                 }
                 await this.persistence.create(session, classifyUserAgent(userAgent));
+                if (signal?.aborted || socket.readyState !== ws_1.WebSocket.OPEN) {
+                    await this.persistence.close(session, 'startup_cancelled', null);
+                    checkStartup();
+                }
+                diagnose('session_persisted');
                 this.sessions.set(sessionId, session);
                 session.slotTimer = setInterval(() => void this.renewSlots(session), SLOT_RENEW_MS);
                 session.slotTimer.unref?.();
                 this.sendEvent(socket, 'voice.session.started', {
+                    flowControl: 'ack-v1',
                     sessionId,
                     epoch: session.epoch,
                     settings: {
@@ -209,6 +259,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                         vadSensitivity: settings.vadSensitivity,
                         endpointSilenceMs: settings.endpointSilenceMs,
                         audioFormat: 'pcm_s16le/16000/mono',
+                        partialTranscription: this.stt.supportsPartial !== false,
                         defaultLanguage,
                         allowedLanguages,
                         ttsLanguages,
@@ -217,6 +268,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                     },
                     language,
                 }, session);
+                diagnose('acknowledgement_sent');
                 this.rotateResumeToken(session);
                 this.armTimers(session);
             });
@@ -227,6 +279,9 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             this.sessions.delete(sessionId);
             await this.releaseSlots(sessionId, slotScopes);
             throw error;
+        }
+        finally {
+            signal?.removeEventListener('abort', releaseOnCancel);
         }
     }
     async acquireSlots(member, scopes, limits) {
@@ -247,7 +302,9 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         return held;
     }
     async releaseSlots(member, scopes) {
-        await Promise.all(scopes.map((scope) => this.store.releaseSlot(scope, member).catch(() => undefined)));
+        await Promise.all(scopes.map((scope) => this.store.releaseSlot(scope, member).catch(() => {
+            this.logger.warn({ event: 'voice_session_slot_release_failed', sessionId: member });
+        })));
     }
     async renewSlots(session) {
         if (session.state === 'closed')
@@ -287,8 +344,16 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.lastActivityAt = Date.now();
         this.armIdleTimer(session);
         const dataObject = event.data ?? {};
+        if (event.type === 'voice.session.ping') {
+            if (typeof dataObject.clientTime !== 'number' || !Number.isFinite(dataObject.clientTime)) {
+                return this.fail(socket, 'PROTO_VIOLATION', 'Invalid timing probe.', 4410);
+            }
+            this.sendEvent(socket, 'voice.session.pong', { clientTime: dataObject.clientTime }, session);
+            return;
+        }
         if (event.type === 'voice.audio.end') {
-            await this.finalizeUtterance(session, 'client_end');
+            void session.processing.then(() => this.runInTenant(session, () => this.finalizeUtterance(session, 'client_end')))
+                .catch(() => this.pipelineFailure(session, new Error('Audio end processing failed.')));
             return;
         }
         if (event.type === 'voice.assistant.interrupt') {
@@ -330,6 +395,10 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             void this.recordEvent(session, 'stale_frame_dropped');
             return;
         }
+        if ((0, audio_diagnostics_1.audioDiagnosticsEnabled)()) {
+            session.audioDiagnostics ??= new audio_diagnostics_1.PcmDiagnostics();
+            session.audioDiagnostics.packet(frame.sequence, frame.epoch);
+        }
         if (!this.checkSequence(session, frame.sequence))
             return;
         if (!this.checkRate(session.recentFrameTimes, FRAME_LIMIT)) {
@@ -349,27 +418,24 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         }
         this.ingressWindowBytes += frame.payload.length;
         if (this.ingressWindowBytes > MAX_GLOBAL_INGRESS_BYTES_PER_SECOND) {
-            this.sendError(session, 'INGRESS_BACKPRESSURE', 'The voice service is temporarily busy.', true);
+            this.sendError(session, 'INGRESS_BACKPRESSURE', 'Audio could not be accepted because the voice service is busy. Voice stopped to avoid incomplete transcription.', false);
+            void this.closeSession(session, 'ingress_backpressure');
+            return;
+        }
+        if (session.pendingAudioBytes + frame.payload.length > 64_000) {
+            this.sendError(session, 'AUDIO_QUEUE_OVERFLOW', 'The audio processing queue exceeded 2 seconds. Voice stopped to avoid incomplete transcription.', false);
+            void this.closeSession(session, 'audio_queue_overflow');
             return;
         }
         session.audioBytes += frame.payload.length;
+        session.audioDiagnostics?.append(frame.payload);
         session.pendingAudioBytes += frame.payload.length;
-        session.audioQueue.push(frame.payload);
-        let droppedBytes = 0;
-        while (session.pendingAudioBytes > 64_000 && session.audioQueue.length > 1) {
-            const dropped = session.audioQueue.shift();
-            session.pendingAudioBytes -= dropped.length;
-            droppedBytes += dropped.length;
-        }
+        session.audioQueue.push({ payload: frame.payload, epoch: frame.epoch, sequence: frame.sequence, receivedAt: performance.now() });
         session.lastActivityAt = now;
         this.armIdleTimer(session);
-        if (droppedBytes > 0) {
-            this.sendEvent(session.socket, 'voice.session.error', {
-                code: 'INGRESS_BACKPRESSURE',
-                message: 'Older audio was dropped to keep the live stream responsive.',
-                recoverable: true,
-                droppedMs: Math.floor(droppedBytes / 32),
-            }, session);
+        if (session.pendingAudioBytes >= 16_000 && !session.flowPaused) {
+            session.flowPaused = true;
+            this.sendEvent(socket, 'voice.audio.flow', { paused: true, queueMs: session.pendingAudioBytes / 32 }, session);
         }
         this.drainAudio(session);
     }
@@ -378,6 +444,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         if (!session || session.state === 'closed')
             return;
         session.socket = undefined;
+        session.vadAbort?.abort();
         session.ttsAbort?.abort();
         session.turnAbort?.abort();
         session.sttAbort?.abort();
@@ -386,6 +453,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.currentAudioBytes = 0;
         session.audioQueue = [];
         session.pendingAudioBytes = 0;
+        session.flowPaused = false;
         session.vadPending = Buffer.alloc(0);
         session.state = 'interrupted';
         this.bumpEpoch(session, 'recovered');
@@ -406,15 +474,28 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.processing = (async () => {
             try {
                 while (session.audioQueue.length > 0 && session.state !== 'closed') {
-                    const payload = session.audioQueue.shift();
+                    const frame = session.audioQueue.shift();
+                    const started = performance.now();
                     try {
-                        await this.runInTenant(session, () => this.consumeAudio(session, payload));
+                        if (frame.epoch === session.epoch) {
+                            await this.runInTenant(session, () => this.consumeAudio(session, frame.payload, frame.sequence));
+                        }
                     }
-                    catch {
-                        await this.pipelineFailure(session);
+                    catch (error) {
+                        if (frame.epoch === session.epoch)
+                            await this.pipelineFailure(session, error);
                     }
                     finally {
-                        session.pendingAudioBytes = Math.max(0, session.pendingAudioBytes - payload.length);
+                        session.pendingAudioBytes = session.audioQueue.reduce((sum, item) => sum + item.payload.length, 0);
+                        if (session.pendingAudioBytes <= 6400)
+                            session.flowPaused = false;
+                        this.sendEvent(session.socket, 'voice.audio.ack', {
+                            sequence: frame.sequence, audioEpoch: frame.epoch, bytes: frame.payload.length,
+                            receivedAtMs: frame.receivedAt, audioMs: frame.payload.length / 32,
+                            queueDepth: session.audioQueue.length, queueMs: session.pendingAudioBytes / 32,
+                            processingMs: performance.now() - started, queueWaitMs: started - frame.receivedAt,
+                            vadMs: session.vadMs ?? 0, paused: session.flowPaused ?? false,
+                        }, session);
                     }
                 }
             }
@@ -438,7 +519,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             void this.runInTenant(session, () => this.closeSession(session, 'protocol_violation', 'PROTO_VIOLATION'));
         }
     }
-    async resume(socket, identity, token, lastEpoch) {
+    async resume(socket, identity, token, lastEpoch, signal) {
         if (!/^mzv_[A-Za-z0-9_-]{43}$/.test(token) ||
             (lastEpoch !== undefined && (!Number.isInteger(lastEpoch) || Number(lastEpoch) < 0))) {
             return this.fail(socket, 'SESSION_MISMATCH', 'The voice session is unavailable.', 4404);
@@ -465,6 +546,8 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         catch {
             claimed = null;
         }
+        if (signal?.aborted || socket.readyState !== ws_1.WebSocket.OPEN)
+            throw new Error('Voice startup cancelled.');
         if (!claimed || session.state === 'closed') {
             return this.fail(socket, 'SESSION_MISMATCH', 'The voice session is unavailable.', 4404);
         }
@@ -478,82 +561,113 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.currentAudio = [];
         session.currentAudioBytes = 0;
         session.vadPending = Buffer.alloc(0);
-        this.sendEvent(socket, 'voice.session.resumed', { sessionId: session.id, epoch: session.epoch }, session);
+        this.sendEvent(socket, 'voice.session.resumed', { sessionId: session.id, epoch: session.epoch, flowControl: 'ack-v1' }, session);
         await this.recordEvent(session, 'session_resume');
         this.rotateResumeToken(session);
         this.armTimers(session);
     }
-    async consumeAudio(session, payload) {
+    async consumeAudio(session, payload, sequence) {
         const extended = session;
-        for (let offset = 0; offset < payload.length; offset += FRAME_BYTES) {
-            const piece = payload.subarray(offset, Math.min(payload.length, offset + FRAME_BYTES));
-            session.vadPending = Buffer.concat([session.vadPending, piece]);
-            while (session.vadPending.length >= FRAME_BYTES) {
-                const vadFrame = session.vadPending.subarray(0, FRAME_BYTES);
-                session.vadPending = session.vadPending.subarray(FRAME_BYTES);
-                session.listenMs += 20;
-                const controller = new AbortController();
-                const result = await this.vad.detect({
-                    streamId: session.id,
-                    audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: vadFrame },
+        let epoch = session.epoch;
+        const combined = session.vadPending.length ? Buffer.concat([session.vadPending, payload]) : payload;
+        const length = combined.length - combined.length % FRAME_BYTES;
+        session.vadPending = combined.subarray(length);
+        const complete = combined.subarray(0, length);
+        const started = performance.now();
+        const controller = new AbortController();
+        session.vadAbort = controller;
+        let batch;
+        try {
+            batch = complete.length && this.vad.detectBatch
+                ? await this.vad.detectBatch({
+                    streamId: session.id, audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: complete },
                     signal: controller.signal,
-                });
-                const speech = result.speech && result.probability >= session.context.settings.vadSensitivity;
-                if (speech) {
-                    if (session.state === 'speaking' && session.context.settings.bargeInEnabled) {
-                        await this.interrupt(session, 'vad_barge_in');
+                })
+                : undefined;
+            if (session.epoch !== epoch || controller.signal.aborted)
+                return;
+        }
+        finally {
+            if (session.vadAbort === controller)
+                session.vadAbort = undefined;
+        }
+        if (batch && batch.length !== length / FRAME_BYTES)
+            throw new Error('Invalid VAD batch length.');
+        session.vadMs = batch ? performance.now() - started : 0;
+        for (let offset = 0; offset < length; offset += FRAME_BYTES) {
+            if (session.epoch !== epoch || session.state === 'closed')
+                return;
+            const vadFrame = complete.subarray(offset, offset + FRAME_BYTES);
+            session.listenMs += 20;
+            const controller = new AbortController();
+            const vadStarted = performance.now();
+            const result = batch?.[offset / FRAME_BYTES] ?? await this.vad.detect({
+                streamId: session.id,
+                audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: vadFrame },
+                signal: controller.signal,
+            });
+            if (!batch)
+                session.vadMs += performance.now() - vadStarted;
+            if (session.epoch !== epoch)
+                return;
+            const speech = result.speech && result.probability >= session.context.settings.vadSensitivity;
+            if (speech) {
+                if (session.state === 'speaking' && session.context.settings.bargeInEnabled) {
+                    await this.interrupt(session, 'vad_barge_in');
+                    epoch = session.epoch;
+                }
+                if (session.state === 'listening' || session.state === 'interrupted') {
+                    session.currentAudio = [...extended.preRoll];
+                    session.currentAudioBytes = session.currentAudio.reduce((sum, block) => sum + block.length, 0);
+                    session.speechMs = 0;
+                    session.silenceMs = 0;
+                    session.utteranceStartedAt = Date.now();
+                    session.timing = { turnId: (0, node_crypto_1.randomUUID)(), startedAt: performance.now(), preRollMs: session.currentAudioBytes / 32 };
+                    this.sendEvent(session.socket, 'voice.speech.started', { sequence, offsetMs: offset / 32, turnId: session.timing.turnId }, session);
+                    session.state = 'detecting_end_of_speech';
+                    await this.recordEvent(session, 'turn_start');
+                }
+                if (session.state === 'detecting_end_of_speech') {
+                    this.appendAudio(session, vadFrame);
+                    session.speechMs += 20;
+                    session.silenceMs = 0;
+                }
+            }
+            else {
+                extended.preRoll.push(Buffer.from(vadFrame));
+                while (extended.preRoll.length > 50)
+                    extended.preRoll.shift();
+                if (session.state === 'detecting_end_of_speech') {
+                    this.appendAudio(session, vadFrame);
+                    session.silenceMs += 20;
+                    if (session.speechMs >= session.context.settings.minSpeechMs &&
+                        session.silenceMs >= session.context.settings.endpointSilenceMs) {
+                        void this.finalizeUtterance(session, 'silence').catch(() => {
+                            this.logger.error(JSON.stringify({ event: 'voice_turn_failed', sessionId: session.id }));
+                            this.sendError(session, 'VOICE_SESSION_UNAVAILABLE', 'The voice service is temporarily unavailable.', false);
+                            session.socket?.close(4503, 'VOICE_SESSION_UNAVAILABLE');
+                        });
                     }
-                    if (session.state === 'listening' || session.state === 'interrupted') {
-                        session.currentAudio = [...extended.preRoll];
-                        session.currentAudioBytes = session.currentAudio.reduce((sum, block) => sum + block.length, 0);
-                        session.speechMs = 0;
+                    if (this.stt.supportsPartial !== false && session.state === 'detecting_end_of_speech' &&
+                        session.currentAudioBytes > 48_000 &&
+                        Date.now() - (session.lastPartialAt ?? 0) >= 1_500) {
+                        session.lastPartialAt = Date.now();
+                        void this.transcribePartial(session);
+                    }
+                }
+                else if (session.state === 'listening') {
+                    session.silenceMs += 20;
+                    const nudgeMs = session.context.settings.silenceNudgeMs;
+                    if (session.silenceMs >= nudgeMs && Date.now() - (session.lastNudgeAt ?? 0) >= nudgeMs) {
+                        session.lastNudgeAt = Date.now();
                         session.silenceMs = 0;
-                        session.utteranceStartedAt = Date.now();
-                        session.state = 'detecting_end_of_speech';
-                        await this.recordEvent(session, 'turn_start');
-                    }
-                    if (session.state === 'detecting_end_of_speech') {
-                        this.appendAudio(session, vadFrame);
-                        session.speechMs += 20;
-                        session.silenceMs = 0;
+                        this.sendEvent(session.socket, 'voice.assistant.thinking', { hint: 'silence' }, session);
                     }
                 }
-                else {
-                    extended.preRoll.push(Buffer.from(vadFrame));
-                    while (extended.preRoll.length > 50)
-                        extended.preRoll.shift();
-                    if (session.state === 'detecting_end_of_speech') {
-                        this.appendAudio(session, vadFrame);
-                        session.silenceMs += 20;
-                        if (session.speechMs >= session.context.settings.minSpeechMs &&
-                            session.silenceMs >= session.context.settings.endpointSilenceMs) {
-                            void this.finalizeUtterance(session, 'silence').catch(() => {
-                                this.logger.error(JSON.stringify({ event: 'voice_turn_failed', sessionId: session.id }));
-                                this.sendError(session, 'VOICE_SESSION_UNAVAILABLE', 'The voice service is temporarily unavailable.', false);
-                                session.socket?.close(4503, 'VOICE_SESSION_UNAVAILABLE');
-                            });
-                        }
-                        if (session.state === 'detecting_end_of_speech' &&
-                            session.currentAudioBytes > 48_000 &&
-                            Date.now() - (session.lastPartialAt ?? 0) >= 1_500) {
-                            session.lastPartialAt = Date.now();
-                            void this.transcribePartial(session);
-                        }
-                    }
-                    else if (session.state === 'listening') {
-                        session.silenceMs += 20;
-                        const nudgeMs = session.context.settings.silenceNudgeMs;
-                        if (session.silenceMs >= nudgeMs && Date.now() - (session.lastNudgeAt ?? 0) >= nudgeMs) {
-                            session.lastNudgeAt = Date.now();
-                            session.silenceMs = 0;
-                            this.sendEvent(session.socket, 'voice.assistant.thinking', { hint: 'silence' }, session);
-                        }
-                    }
-                }
-                if (session.currentAudioBytes > MAX_UTTERANCE_BYTES) {
-                    this.sendError(session, 'UTTERANCE_TOO_LARGE', 'The spoken turn is too long.', true);
-                    await this.resetTurn(session, 'turn_reset');
-                }
+            }
+            if (session.currentAudioBytes >= MAX_UTTERANCE_BYTES) {
+                this.sendError(session, 'UTTERANCE_TOO_LARGE', 'Please pause after at most 20 seconds of speech. This overlong turn was not transcribed.', true);
+                await this.resetTurn(session, 'turn_reset');
             }
         }
     }
@@ -574,6 +688,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                 },
                 language: session.context.language,
                 partial: true,
+                requestId: session.timing?.turnId,
                 signal: controller.signal,
             });
             if (session.epoch !== epoch || session.state !== 'detecting_end_of_speech' || session.turnId !== turnId)
@@ -605,42 +720,92 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             session.currentAudioBytes === 0)
             return;
         const epoch = session.epoch;
+        const buffering = {
+            preRollMs: session.timing?.preRollMs,
+            trailingSilenceMs: session.silenceMs,
+            vadSpeechMs: session.speechMs,
+            reason,
+        };
+        if (session.timing)
+            session.timing.endpointAt = performance.now();
         session.state = 'transcribing';
         this.sendEvent(session.socket, 'voice.assistant.thinking', { hint: 'transcribing' }, session);
         await this.persistState(session);
         await this.recordEvent(session, 'endpoint_detected', reason);
         const audio = Buffer.concat(session.currentAudio);
+        let diagnosticMetadata;
+        if (session.audioDiagnostics) {
+            const segmented = new audio_diagnostics_1.PcmDiagnostics();
+            segmented.append(audio);
+            diagnosticMetadata = { ingress: session.audioDiagnostics.snapshot(), finalStt: segmented.snapshot() };
+            this.logger.log({
+                event: 'voice_audio_diagnostics', sessionId: session.id, turnId: session.timing?.turnId,
+                ...diagnosticMetadata,
+                vadStartMs: session.timing?.startedAt, vadEndMs: session.timing?.endpointAt, buffering,
+            });
+        }
         session.partialAbort?.abort();
         session.sttAbort?.abort();
         const controller = new AbortController();
         session.sttAbort = controller;
+        const sttStarted = performance.now();
+        let sttMs;
+        const timing = session.timing;
         try {
+            const vocabulary = await this.productIdentity?.vocabulary(session.context.agent) ?? [];
             const result = await this.stt.transcribe({
                 audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: audio },
                 language: session.context.language === 'auto'
                     ? session.context.settings.sttLanguageHint
                     : session.context.language,
                 partial: false,
+                requestId: session.timing?.turnId,
+                vocabulary: vocabulary.map(product => product.name),
                 signal: controller.signal,
             });
+            sttMs = performance.now() - sttStarted;
             if (session.epoch !== epoch || session.state !== 'transcribing') {
                 await this.recordEvent(session, 'late_agent_response_discarded', 'stale_transcription');
                 return;
             }
             const text = normalizeTranscript(result.text, 2000);
+            this.logger.log({
+                event: 'voice_product_transcript', requestId: session.timing?.turnId,
+                audioBytes: audio.length, audioMs: audio.length / 32,
+                rawLength: result.text.length, normalizedLength: text.length,
+                normalizationChanged: result.text !== text,
+                rawProductMentions: (0, product_identity_service_1.productMentions)(result.text, vocabulary),
+                normalizedProductMentions: (0, product_identity_service_1.productMentions)(text, vocabulary),
+                vocabularyCount: vocabulary.length, confidence: result.confidence ?? null,
+                recognitionReliable: result.recognitionQuality?.reliable ?? null,
+            });
             if (!text) {
                 await this.resetTurn(session, 'turn_reset');
                 return;
             }
             session.context.language = session.context.language === 'auto' ? result.language : session.context.language;
+            if (session.timing) {
+                session.timing.sttMs = sttMs;
+                session.timing.sttProcessingMs = result.processingMs;
+            }
             this.sendEvent(session.socket, 'voice.transcript.final', {
                 text,
+                rawText: result.text,
                 language: result.language,
                 confidence: result.confidence ?? null,
                 durationMs: Date.now() - (session.utteranceStartedAt ?? Date.now()),
+                sttMs,
+                audioMs: audio.length / 32,
+                buffering,
+                ...(diagnosticMetadata ? { audioDiagnostics: diagnosticMetadata } : {}),
+                turnId: session.timing?.turnId,
+                endpointMs: session.timing?.endpointAt === undefined ? undefined : session.timing.endpointAt - session.timing.startedAt,
+                sttProcessingMs: result.processingMs,
+                sttTimings: result.timings,
+                recognitionQuality: result.recognitionQuality,
             }, session);
             await this.recordEvent(session, 'transcript_final', `language_${result.language}`);
-            await this.invokeAgent(session, text, epoch);
+            await this.invokeAgent(session, text, epoch, result.recognitionQuality?.reliable !== false);
         }
         catch (error) {
             if (session.epoch !== epoch || !this.sessions.has(session.id) || controller.signal.aborted)
@@ -652,20 +817,27 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             await this.resetTurn(session, 'recovered');
         }
         finally {
+            this.logger.log({
+                event: 'voice_stt_timing', sessionId: session.id, turnId: timing?.turnId, epoch,
+                audioMs: audio.length / 32, processingMs: sttMs ?? performance.now() - sttStarted,
+                aborted: controller.signal.aborted,
+            });
             if (session.sttAbort === controller)
                 session.sttAbort = undefined;
         }
     }
-    async invokeAgent(session, text, epoch) {
+    async invokeAgent(session, text, epoch, recognitionReliable = true) {
         if (session.state !== 'transcribing' || session.epoch !== epoch)
             return;
         session.state = 'thinking';
-        const turnId = (0, node_crypto_1.randomUUID)();
+        const turnId = session.timing?.turnId ?? (0, node_crypto_1.randomUUID)();
         session.turnId = turnId;
+        session.context.agent = Object.freeze({ ...session.context.agent, requestId: turnId });
         session.turnAbort = new AbortController();
         await this.persistState(session);
         this.sendEvent(session.socket, 'voice.assistant.thinking', {}, session);
         await this.recordEvent(session, 'turn_start', 'agent');
+        const progress = { generatingSpeech: false };
         try {
             await this.runInTenant(session, async () => {
                 if (!session.context.conversationId) {
@@ -697,40 +869,109 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                         ...(session.context.language === 'auto' ? {} : { language: session.context.language }),
                     });
                 }
-                const response = await this.agent.invoke(text, session.context.agent, session.turnAbort.signal);
+                const agentStarted = performance.now();
+                if (recognitionReliable && this.agent.stream) {
+                    const events = this.agent.stream(text, session.context.agent, session.turnAbort.signal)[Symbol.asyncIterator]();
+                    try {
+                        const first = await events.next();
+                        if (first.done)
+                            throw new Error('Empty agent stream.');
+                        if ('text' in first.value) {
+                            const firstText = first.value.text;
+                            let finalResponse;
+                            let agentMs;
+                            const sentences = async function* () {
+                                try {
+                                    yield* splitSentences(firstText);
+                                    while (true) {
+                                        const next = await events.next();
+                                        if (next.done)
+                                            break;
+                                        if ('text' in next.value)
+                                            yield* splitSentences(next.value.text);
+                                        else {
+                                            finalResponse = next.value.response;
+                                            agentMs = next.value.agentMs;
+                                            if (!finalResponse.success)
+                                                throw new Error('Streamed agent answer failed.');
+                                        }
+                                    }
+                                    if (!finalResponse)
+                                        throw new Error('Incomplete agent stream.');
+                                }
+                                catch (error) {
+                                    progress.generatingSpeech = false;
+                                    throw error;
+                                }
+                            };
+                            this.logger.log({ event: 'voice_agent_first_text', turnId, firstTextMs: performance.now() - agentStarted });
+                            progress.generatingSpeech = true;
+                            await this.speakResponse(session, { success: true, answer: '', model: '', toolCalls: [], sources: [] }, epoch, turnId, sentences(), () => {
+                                if (!finalResponse)
+                                    throw new Error('Missing final agent response.');
+                                if (session.timing?.turnId === turnId)
+                                    session.timing.agentMs = agentMs;
+                                return finalResponse;
+                            });
+                            return;
+                        }
+                        if (session.timing?.turnId === turnId)
+                            session.timing.agentMs = performance.now() - agentStarted;
+                        progress.generatingSpeech = true;
+                        await this.speakResponse(session, first.value.response, epoch, turnId);
+                        return;
+                    }
+                    finally {
+                        await events.return?.();
+                    }
+                }
+                const response = recognitionReliable
+                    ? await this.agent.invoke(text, session.context.agent, session.turnAbort.signal)
+                    : { success: true, answer: 'I could not hear that clearly. Please repeat your request.',
+                        model: 'voice-clarification', toolCalls: [], sources: [] };
+                const agentMs = performance.now() - agentStarted;
+                if (session.timing?.turnId === turnId)
+                    session.timing.agentMs = agentMs;
+                this.logger.log({ event: 'voice_agent_timing', sessionId: session.id, turnId, agentMs });
                 if (session.state !== 'thinking' || session.epoch !== epoch || session.turnId !== turnId) {
                     await this.recordEvent(session, 'late_agent_response_discarded');
                     return;
                 }
+                progress.generatingSpeech = true;
                 await this.speakResponse(session, response, epoch, turnId);
             });
         }
         catch {
             if (this.sessions.get(session.id) === session && session.epoch === epoch && session.turnId === turnId) {
-                this.sendError(session, 'AGENT_UNAVAILABLE', 'The assistant could not complete this turn.', true);
+                const ttsFailed = progress.generatingSpeech;
+                this.sendError(session, ttsFailed ? 'TTS_UNAVAILABLE' : 'AGENT_UNAVAILABLE', ttsFailed ? 'Speech playback could not be generated. The answer is available as text.' : 'The assistant could not complete this turn.', true);
                 await this.resetTurn(session, 'recovered');
             }
         }
     }
-    async speakResponse(session, response, epoch, turnId) {
+    async speakResponse(session, response, epoch, turnId, streamedSentences, completedResponse) {
         if (!response || typeof response.answer !== 'string' || response.answer.length > 32_000) {
             throw new Error('Invalid agent response.');
         }
         const sentences = splitSentences(response.answer);
-        this.sendEvent(session.socket, 'voice.assistant.response', {
-            success: response.success,
-            answer: response.answer,
-            model: response.model,
-            toolCalls: response.toolCalls.slice(0, 50),
-            sources: response.sources.slice(0, 50),
+        const sendResponse = (result) => this.sendEvent(session.socket, 'voice.assistant.response', {
+            success: result.success,
+            answer: result.answer,
+            model: result.model,
+            toolCalls: result.toolCalls.slice(0, 50),
+            sources: result.sources.slice(0, 50),
+            ...(result.products ? { products: result.products.slice(0, 5) } : {}),
             turnId,
+            agentMs: session.timing?.agentMs,
         }, session);
+        if (!streamedSentences)
+            sendResponse(response);
         for (const sentence of sentences) {
             if (!this.isCurrentTurn(session, epoch, turnId))
                 return;
             this.sendEvent(session.socket, 'voice.assistant.text.delta', { delta: sentence, turnId }, session);
         }
-        if (!response.success || !sentences.length) {
+        if (!streamedSentences && (!response.success || !sentences.length)) {
             await this.finishSpokenTurn(session, epoch, turnId, 0);
             return;
         }
@@ -748,7 +989,8 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         }
         const configuredVoice = voiceSettings.voice ?? defaultVoice(language);
         const voice = typeof session.context.settings.ttsVoice === 'string' &&
-            this.tts.supportsVoice(language, session.context.settings.ttsVoice)
+            (this.tts.supportsVoice(language, session.context.settings.ttsVoice) ||
+                (session.context.settings.ttsVoice.startsWith('clone:') && this.library))
             ? session.context.settings.ttsVoice
             : configuredVoice;
         const rate = voiceSettings.rate ?? session.context.settings.speechRate;
@@ -760,14 +1002,21 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         let totalBytes = 0;
         let sampleRate = 16000;
         let announced = false;
-        for (const sentence of sentences) {
-            const iterable = this.tts.synthesize({
+        const ttsStarted = performance.now();
+        let firstAudioMs;
+        for await (const sentence of streamedSentences ?? sentences) {
+            const request = {
                 text: sentence,
                 language,
                 voice,
                 rate,
                 signal: ttsAbort.signal,
-            });
+            };
+            if (streamedSentences)
+                this.sendEvent(session.socket, 'voice.assistant.text.delta', { delta: sentence, turnId, streamed: true }, session);
+            const iterable = voice.startsWith('clone:') && this.library
+                ? this.library.synthesize(session.context.agent.tenantId, request)
+                : this.tts.synthesize(request);
             for await (const chunk of iterable) {
                 if (!this.isCurrentTurn(session, epoch, turnId) || ttsAbort.signal.aborted) {
                     await this.recordEvent(session, 'late_agent_response_discarded', 'stale_tts_chunk');
@@ -779,12 +1028,17 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                     throw new Error('TTS output limit exceeded.');
                 }
                 if (!announced) {
+                    firstAudioMs = performance.now() - ttsStarted;
+                    this.logger.log({ event: 'voice_first_audio', sessionId: session.id, turnId,
+                        endpointToFirstAudioMs: session.timing?.endpointAt === undefined
+                            ? undefined : performance.now() - session.timing.endpointAt });
                     this.sendEvent(session.socket, 'voice.assistant.audio.chunk', {
                         epoch,
                         turnId,
                         encoding: 'pcm_s16le',
                         sampleRate,
                         frames: 0,
+                        ttsFirstAudioMs: firstAudioMs,
                     }, session);
                     announced = true;
                 }
@@ -793,8 +1047,18 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         }
         if (!this.isCurrentTurn(session, epoch, turnId) || ttsAbort.signal.aborted)
             return;
+        if (completedResponse)
+            sendResponse(completedResponse());
         const totalMs = Math.floor(totalBytes / (sampleRate * 2) * 1000);
-        this.sendEvent(session.socket, 'voice.assistant.audio.end', { epoch, turnId, totalMs }, session);
+        const generationMs = performance.now() - ttsStarted;
+        const timing = {
+            sttMs: session.timing?.sttMs, sttProcessingMs: session.timing?.sttProcessingMs,
+            agentMs: session.timing?.agentMs, ttsFirstAudioMs: firstAudioMs, ttsGenerationMs: generationMs,
+            ttsRealTimeFactor: totalMs > 0 ? generationMs / totalMs : 0,
+            speechToGenerationEndMs: session.timing ? performance.now() - session.timing.startedAt : undefined,
+        };
+        this.logger.log({ event: 'voice_turn_timing', sessionId: session.id, turnId, ...timing, outputAudioMs: totalMs });
+        this.sendEvent(session.socket, 'voice.assistant.audio.end', { epoch, turnId, totalMs, timing }, session);
         await this.finishSpokenTurn(session, epoch, turnId, totalMs);
     }
     async finishSpokenTurn(session, epoch, turnId, speakMs) {
@@ -816,11 +1080,13 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         if (!session.context.settings.bargeInEnabled && reason === 'vad_barge_in')
             return;
         session.epoch = (session.epoch + 1) >>> 0;
+        session.incomingSequence = undefined;
         session.interrupts++;
         session.ttsAbort?.abort();
         session.turnAbort?.abort();
         session.sttAbort?.abort();
         session.partialAbort?.abort();
+        session.vadAbort?.abort();
         session.ttsAbort = undefined;
         session.turnAbort = undefined;
         session.turnId = undefined;
@@ -828,7 +1094,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.currentAudioBytes = 0;
         session.audioQueue = [];
         session.pendingAudioBytes = 0;
-        session.pendingAudioBytes = 0;
+        session.flowPaused = false;
         session.vadPending = Buffer.alloc(0);
         session.state = 'interrupted';
         this.sendEvent(session.socket, 'voice.assistant.epoch', { epoch: session.epoch, reason: 'interrupt' }, session);
@@ -839,8 +1105,11 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
     }
     async resetTurn(session, reason) {
         session.partialAbort?.abort();
+        session.vadAbort?.abort();
         session.currentAudio = [];
         session.currentAudioBytes = 0;
+        session.preRoll = [];
+        session.vadPending = Buffer.alloc(0);
         session.speechMs = 0;
         session.silenceMs = 0;
         session.utteranceStartedAt = undefined;
@@ -850,13 +1119,18 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         session.ttsAbort = undefined;
         session.state = 'listening';
         session.epoch = (session.epoch + 1) >>> 0;
+        session.incomingSequence = undefined;
         this.sendEvent(session.socket, 'voice.assistant.epoch', { epoch: session.epoch, reason }, session);
         await this.persistState(session);
     }
-    async pipelineFailure(session) {
+    async pipelineFailure(session, error) {
         if (session.state === 'closed')
             return;
-        this.sendError(session, 'VOICE_ENGINE_UNAVAILABLE', 'The voice service is temporarily unavailable.', true);
+        this.logger.warn({
+            event: 'voice_audio_pipeline_failed', sessionId: session.id,
+            reason: error instanceof voice_provider_util_1.VoiceProviderError ? error.code : 'AUDIO_PROCESSING_FAILED',
+        });
+        this.sendError(session, 'VOICE_AUDIO_PROCESSING_FAILED', 'Live audio processing failed. The voice activity service may be busy or unavailable. Please try again.', true);
         session.state = 'error';
         await this.recordEvent(session, 'session_error', 'VOICE_ENGINE_UNAVAILABLE');
         await this.resetTurn(session, 'recovered');
@@ -904,10 +1178,16 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         if (session.state === 'closed')
             return;
         session.state = 'closed';
+        if (session.audioDiagnostics)
+            this.logger.log({
+                event: 'voice_audio_diagnostics_closed', sessionId: session.id, reason,
+                ingress: session.audioDiagnostics.snapshot(),
+            });
         session.turnAbort?.abort();
         session.ttsAbort?.abort();
         session.sttAbort?.abort();
         session.partialAbort?.abort();
+        session.vadAbort?.abort();
         if (session.idleTimer)
             clearTimeout(session.idleTimer);
         if (session.sessionTimer)
@@ -919,7 +1199,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         if (session.slotTimer)
             clearInterval(session.slotTimer);
         this.sessions.delete(session.id);
-        void this.releaseSlots(session.id, session.slotScopes ?? []);
+        await this.releaseSlots(session.id, session.slotScopes ?? []);
         session.currentAudio = [];
         session.audioQueue = [];
         session.pendingAudioBytes = 0;
@@ -1006,7 +1286,11 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         }
         if (delta > 1) {
             void this.recordEvent(session, 'sequence_gap', `gap_${Math.min(delta - 1, 0xffffffff)}`);
-            this.sendError(session, 'SEQUENCE_GAP', 'An audio frame was missed.', true);
+            this.sendError(session, 'SEQUENCE_GAP', 'An audio frame was missed. Voice stopped to avoid incomplete transcription.', false);
+            session.sttAbort?.abort();
+            session.partialAbort?.abort();
+            void this.closeSession(session, 'audio_sequence_gap');
+            return false;
         }
         session.incomingSequence = sequence;
         return true;
@@ -1086,6 +1370,7 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
     }
     bumpEpoch(session, reason) {
         session.epoch = (session.epoch + 1) >>> 0;
+        session.incomingSequence = undefined;
         this.sendEvent(session.socket, 'voice.assistant.epoch', { epoch: session.epoch, reason }, session);
     }
 };
@@ -1097,9 +1382,12 @@ exports.VoiceSessionManager = VoiceSessionManager = VoiceSessionManager_1 = __de
     __param(5, (0, common_1.Inject)(tts_port_1.TEXT_TO_SPEECH)),
     __param(6, (0, common_1.Inject)(agent_invocation_port_1.AGENT_INVOCATION)),
     __param(7, (0, common_1.Inject)(shared_state_1.SHARED_STATE)),
+    __param(8, (0, common_1.Optional)()),
+    __param(9, (0, common_1.Optional)()),
     __metadata("design:paramtypes", [voice_auth_service_1.VoiceAuthService,
         voice_session_repository_1.VoiceSessionRepository,
-        conversations_service_1.ConversationsService, Object, Object, Object, Object, Object])
+        conversations_service_1.ConversationsService, Object, Object, Object, Object, Object, voice_library_service_1.VoiceLibraryService,
+        product_identity_service_1.ProductIdentityService])
 ], VoiceSessionManager);
 function decodeAudioFrame(data) {
     if (data.length <= HEADER_BYTES)
@@ -1154,7 +1442,18 @@ function splitSentences(value) {
     const normalized = value.replace(/\s+/g, ' ').trim();
     if (!normalized)
         return [];
-    return normalized.match(/[^.!?。！？]+[.!?。！？]*/g)?.map((item) => item.trim()).filter(Boolean) ?? [normalized];
+    return normalized.split(/(?<=[.!?。！？])\s+/u).flatMap((sentence) => {
+        const parts = [];
+        while (sentence.length > 500) {
+            const space = sentence.lastIndexOf(' ', 500);
+            const boundary = space > 0 ? space : 500;
+            parts.push(sentence.slice(0, boundary));
+            sentence = sentence.slice(boundary).trimStart();
+        }
+        if (sentence)
+            parts.push(sentence);
+        return parts;
+    });
 }
 function defaultVoice(language) {
     return language === 'hi' ? 'hi_IN-pratham-medium' : 'en_US-amy-medium';

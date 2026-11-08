@@ -1,4 +1,5 @@
 import base64
+import argparse
 import json
 import time
 import urllib.error
@@ -19,6 +20,12 @@ def request(port, path, body=None, content_type="application/json"):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--vad-only", action="store_true")
+    args = parser.parse_args()
+    if args.vad_only:
+        verify_vad_processing()
+        return
     for port in (8001, 8002, 8003):
         body, _ = request(port, "/health")
         assert json.loads(body)["healthy"], f"Port {port} is not healthy."
@@ -76,6 +83,33 @@ def main():
     assert elapsed < 45, f"STT exceeded the backend's 45-second final-transcription timeout: {elapsed:.2f}s"
     print(f"STT recognized generated English speech in {elapsed:.2f}s: {result['text']}", flush=True)
     print("Real local STT, VAD and all configured Piper voices passed.", flush=True)
+
+
+def verify_vad_processing():
+    stream_id = str(uuid4())
+    for size in (640, 3200, 6400, 14080):
+        started = time.monotonic()
+        body, _ = request(8002, "/predict", {
+            "audio": base64.b64encode(bytes(size)).decode(), "encoding": "pcm_s16le",
+            "sampleRate": 16000, "channels": 1, "streamId": stream_id,
+        })
+        result = json.loads(body)
+        assert len(result["frames"]) == size // 640
+        assert all(isinstance(frame["speech"], bool) and 0 <= frame["probability"] <= 1
+                   for frame in result["frames"])
+        print(f"VAD POST /predict: HTTP 200, {size} bytes, {len(result['frames'])} decisions, "
+              f"{(time.monotonic() - started) * 1000:.2f} ms", flush=True)
+    for size in (0, 639, 14400):
+        try:
+            request(8002, "/predict", {
+                "audio": base64.b64encode(bytes(size)).decode(), "encoding": "pcm_s16le",
+                "sampleRate": 16000, "channels": 1, "streamId": stream_id,
+            })
+        except urllib.error.HTTPError as error:
+            assert error.code == 422
+        else:
+            raise AssertionError(f"VAD accepted invalid PCM byte length {size}.")
+    print("Real VAD processing and invalid audio rejection passed.", flush=True)
 
 
 if __name__ == "__main__":

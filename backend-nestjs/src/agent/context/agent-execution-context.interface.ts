@@ -32,6 +32,8 @@ export interface AgentExecutionContext {
 
   /** Optional assistant id set only by a backend-verified conversation/session. */
   assistantId?: string;
+  /** Only established from an origin-bound signed merchant widget session. */
+  merchant?: { integrationId: string; sessionId: string; origin: string };
 
   /** Permission strings granted to the caller for this request. */
   permissions: readonly string[];
@@ -57,6 +59,11 @@ export function isAgentExecutionContext(
     /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(context.requestId) &&
     Array.isArray(context.permissions) &&
     (context.assistantId === undefined || isUuidv7(context.assistantId)) &&
+    (context.merchant === undefined || (
+      context.channel === 'widget' && isUuidv7(context.merchant.integrationId) &&
+      typeof context.merchant.sessionId === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(context.merchant.sessionId) &&
+      typeof context.merchant.origin === 'string' && context.merchant.origin.length <= 300
+    )) &&
     (context.userId === undefined || isUuidv7(context.userId)) &&
     (context.conversationId === undefined || isUuidv7(context.conversationId)) &&
     (context.channel === undefined || context.channel === 'widget') &&

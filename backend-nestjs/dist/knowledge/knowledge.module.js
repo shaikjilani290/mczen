@@ -28,7 +28,7 @@ exports.KnowledgeModule = KnowledgeModule = __decorate([
             { provide: knowledge_retriever_1.KNOWLEDGE_RETRIEVER, useExisting: knowledge_retriever_1.MysqlKnowledgeRetriever },
             { provide: document_storage_1.DocumentStorage, useClass: document_storage_1.LocalDocumentStorage },
         ],
-        exports: [knowledge_retriever_1.KNOWLEDGE_RETRIEVER],
+        exports: [knowledge_retriever_1.KNOWLEDGE_RETRIEVER, knowledge_repository_1.KnowledgeRepository],
     })
 ], KnowledgeModule);
 //# sourceMappingURL=knowledge.module.js.map

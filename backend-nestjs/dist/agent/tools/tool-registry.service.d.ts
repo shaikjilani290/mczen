@@ -1,12 +1,16 @@
 import { OnModuleInit } from '@nestjs/common';
 import { KnowledgeService } from '../knowledge.service';
 import { ToolConfigurationRepository, ToolExecutionSettings } from '../../tools/tool-configuration.repository';
+import { WebsiteIntegrationRepository } from '../../website-integrations/website-integration.repository';
+import { MerchantCartService } from '../../website-integrations/merchant-cart.service';
 import { ToolDefinition, ToolMetadata } from './interfaces/tool-definition.interface';
 export declare class ToolRegistryService implements OnModuleInit {
     private readonly knowledge;
     private readonly configuration?;
+    private readonly websiteIntegrations?;
+    private readonly merchantCart?;
     private readonly tools;
-    constructor(knowledge: KnowledgeService, configuration?: ToolConfigurationRepository | undefined);
+    constructor(knowledge: KnowledgeService, configuration?: ToolConfigurationRepository | undefined, websiteIntegrations?: WebsiteIntegrationRepository | undefined, merchantCart?: MerchantCartService | undefined);
     onModuleInit(): Promise<void>;
     register(tool: ToolDefinition): void;
     unregister(name: string): boolean;

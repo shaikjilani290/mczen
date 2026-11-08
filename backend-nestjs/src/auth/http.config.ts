@@ -4,7 +4,12 @@ import type { NextFunction, Response } from 'express';
 import type { AuthenticatedRequest } from './auth-context';
 import { RateLimitService } from './rate-limit.service';
 import { readTrustProxySetting } from './trust-proxy.config';
-import { WIDGET_PUBLIC_PATH, widgetCorsOptions } from './cors.config';
+import { WEBSITE_PUBLIC_PATHS, WIDGET_PUBLIC_PATH, widgetCorsOptions } from './cors.config';
+
+export function corsOptionsForPath(path: string, cors: CorsOptions): CorsOptions {
+  const publicBrowserIntegration = WEBSITE_PUBLIC_PATHS.includes(path);
+  return path.startsWith(WIDGET_PUBLIC_PATH) || publicBrowserIntegration ? widgetCorsOptions : cors;
+}
 
 /** Call before app.init/listen so the IP limiter precedes Nest's body parser. */
 export function configureHttpApplication(app: INestApplication, cors: CorsOptions): void {
@@ -25,6 +30,6 @@ export function configureHttpApplication(app: INestApplication, cors: CorsOption
   });
   app.enableCors((request: { url?: string }, callback: (error: Error | null, options?: CorsOptions) => void) => {
     const path = (request.url ?? '').split('?')[0];
-    callback(null, path.startsWith(WIDGET_PUBLIC_PATH) ? widgetCorsOptions : cors);
+    callback(null, corsOptionsForPath(path, cors));
   });
 }

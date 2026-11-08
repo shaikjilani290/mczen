@@ -13,6 +13,9 @@ function isAgentExecutionContext(value) {
         /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(context.requestId) &&
         Array.isArray(context.permissions) &&
         (context.assistantId === undefined || (0, uuid_1.isUuidv7)(context.assistantId)) &&
+        (context.merchant === undefined || (context.channel === 'widget' && (0, uuid_1.isUuidv7)(context.merchant.integrationId) &&
+            typeof context.merchant.sessionId === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(context.merchant.sessionId) &&
+            typeof context.merchant.origin === 'string' && context.merchant.origin.length <= 300)) &&
         (context.userId === undefined || (0, uuid_1.isUuidv7)(context.userId)) &&
         (context.conversationId === undefined || (0, uuid_1.isUuidv7)(context.conversationId)) &&
         (context.channel === undefined || context.channel === 'widget') &&

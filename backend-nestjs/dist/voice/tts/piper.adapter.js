@@ -38,10 +38,22 @@ let PiperAdapter = class PiperAdapter {
     }
     async *synthesize(request) {
         if (!this.supports(request.language) || !this.supportsVoice(request.language, request.voice) ||
-            request.text.length === 0 || request.text.length > 2_000 ||
+            request.text.trim().length === 0 || request.text.length > 2_000 ||
             !Number.isFinite(request.rate) || request.rate < 0.5 || request.rate > 2) {
             throw new voice_provider_util_1.VoiceProviderError('VOICE_PROVIDER_INVALID');
         }
+        const limit = Math.floor(120 * Math.min(request.rate, 1));
+        let text = request.text.trim();
+        while (text.length > limit) {
+            const space = text.lastIndexOf(' ', limit);
+            const boundary = space > 0 ? space : limit;
+            yield* this.synthesizeSegment({ ...request, text: text.slice(0, boundary) });
+            text = text.slice(boundary).trimStart();
+        }
+        if (text)
+            yield* this.synthesizeSegment({ ...request, text });
+    }
+    async *synthesizeSegment(request) {
         const release = await this.slots.acquire(request.signal);
         let reader;
         try {
@@ -73,7 +85,7 @@ let PiperAdapter = class PiperAdapter {
             while (true) {
                 if (request.signal.aborted)
                     throw new voice_provider_util_1.VoiceProviderError('VOICE_PROVIDER_TIMEOUT');
-                const { done, value } = await reader.read();
+                const { done, value } = await this.readChunk(reader, request.signal);
                 if (done)
                     break;
                 total += value.byteLength;
@@ -99,6 +111,22 @@ let PiperAdapter = class PiperAdapter {
                 reader.releaseLock();
             }
             release();
+        }
+    }
+    async readChunk(reader, signal) {
+        let rejectWait = () => { };
+        const cancelled = new Promise((_resolve, reject) => { rejectWait = reject; });
+        const onAbort = () => rejectWait(new voice_provider_util_1.VoiceProviderError('VOICE_PROVIDER_TIMEOUT'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        const timer = setTimeout(onAbort, 12_000);
+        if (signal.aborted)
+            onAbort();
+        try {
+            return await Promise.race([reader.read(), cancelled]);
+        }
+        finally {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', onAbort);
         }
     }
     async healthCheck() {

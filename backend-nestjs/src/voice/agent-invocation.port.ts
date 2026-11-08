@@ -3,6 +3,7 @@ import type { AgentResponse } from '../agent/agent.service';
 
 export interface AgentInvocationPort {
   invoke(question: string, context: AgentExecutionContext, signal: AbortSignal): Promise<AgentResponse>;
+  stream?(question: string, context: AgentExecutionContext, signal: AbortSignal): AsyncIterable<{ text: string } | { response: AgentResponse; agentMs?: number }>;
 }
 
 export const AGENT_INVOCATION = Symbol('AGENT_INVOCATION');

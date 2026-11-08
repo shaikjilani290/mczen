@@ -17,12 +17,13 @@ const tool_configuration_repository_1 = require("./tool-configuration.repository
 const tool_secret_cipher_1 = require("./tool-secret-cipher");
 const tools_controller_1 = require("./tools.controller");
 const tools_service_1 = require("./tools.service");
+const website_data_module_1 = require("../website-integrations/website-data.module");
 let ToolsModule = class ToolsModule {
 };
 exports.ToolsModule = ToolsModule;
 exports.ToolsModule = ToolsModule = __decorate([
     (0, common_1.Module)({
-        imports: [knowledge_module_1.KnowledgeModule],
+        imports: [knowledge_module_1.KnowledgeModule, website_data_module_1.WebsiteDataModule],
         controllers: [tools_controller_1.ToolsController],
         providers: [
             knowledge_service_1.KnowledgeService,

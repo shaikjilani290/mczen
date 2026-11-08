@@ -68,6 +68,7 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
         }
         if (path !== PATH)
             return;
+        this.logger.log({ event: 'voice_connection_stage', stage: 'upgrade_received' });
         if (request.url?.includes('?'))
             return this.rejectUpgrade(socket, 400, 'Query strings are not accepted');
         if (!this.hasProtocol(request)) {
@@ -79,6 +80,7 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
         const dashboardOrigin = this.isAllowedOrigin(origin);
         if (!dashboardOrigin && !isWellFormedOrigin(origin))
             return this.rejectUpgrade(socket, 403, 'Origin denied');
+        this.logger.log({ event: 'voice_connection_stage', stage: 'origin_validated', widgetTicketRequired: !dashboardOrigin });
         if (this.pendingSockets >= 48)
             return this.rejectUpgrade(socket, 429, 'Voice service busy');
         this.wss?.handleUpgrade(request, socket, head, (client) => {
@@ -91,9 +93,24 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
         this.sockets.set(socket, { alive: true, counted: true });
         let started = false;
         let starting = false;
+        let stage = 'awaiting_start';
+        const startup = new AbortController();
+        const since = performance.now();
+        const diagnose = (next) => {
+            stage = next;
+            this.logger.log({ event: 'voice_connection_stage', stage, elapsedMs: Math.round(performance.now() - since) });
+        };
+        diagnose('socket_open');
         const timer = setTimeout(() => {
-            if (!started)
-                socket.close(4410, 'SESSION_START_TIMEOUT');
+            if (started)
+                return;
+            this.logger.warn({ event: 'voice_connection_timeout', stage, elapsedMs: Math.round(performance.now() - since) });
+            startup.abort();
+            socket.send(JSON.stringify({
+                v: 1, type: 'voice.session.error', ts: new Date().toISOString(),
+                data: { code: 'SESSION_START_TIMEOUT', message: `Voice session startup timed out at ${stage}.`, recoverable: false },
+            }));
+            socket.close(4410, 'SESSION_START_TIMEOUT');
         }, START_TIMEOUT_MS);
         socket.on('pong', () => {
             const state = this.sockets.get(socket);
@@ -108,6 +125,7 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
                     return;
                 }
                 starting = true;
+                diagnose('start_received');
                 let event;
                 try {
                     const text = toBuffer(data).toString('utf8');
@@ -127,11 +145,13 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
                 }
                 let identity;
                 try {
+                    diagnose('authenticating_ticket');
                     identity = await this.tickets.consume(event.data.ticket, origin);
                     if (widgetOnly && !identity.widget)
                         throw new Error('not a widget ticket');
                 }
                 catch {
+                    diagnose('authentication_failed');
                     clearTimeout(timer);
                     socket.send(JSON.stringify({
                         v: 1,
@@ -144,11 +164,19 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
                 }
                 if (socket.readyState !== ws_1.WebSocket.OPEN)
                     return;
-                started = true;
-                clearTimeout(timer);
+                diagnose('creating_session');
                 const { ticket: _ticket, ...startData } = event.data;
-                void this.sessions.begin(socket, identity, startData, userAgent)
+                void this.sessions.begin(socket, identity, startData, userAgent, startup.signal)
+                    .then(() => {
+                    if (startup.signal.aborted || socket.readyState !== ws_1.WebSocket.OPEN)
+                        return;
+                    started = true;
+                    clearTimeout(timer);
+                    diagnose('session_initialized');
+                })
                     .catch(() => {
+                    diagnose('session_creation_failed');
+                    clearTimeout(timer);
                     if (socket.readyState !== ws_1.WebSocket.OPEN)
                         return;
                     socket.send(JSON.stringify({
@@ -167,12 +195,17 @@ let VoiceGateway = VoiceGateway_1 = class VoiceGateway {
             }
         });
         socket.on('close', () => {
+            startup.abort();
+            diagnose('socket_closed');
             this.releasePendingSocket(socket);
             clearTimeout(timer);
             this.sessions.onDisconnect(socket);
             this.sockets.delete(socket);
         });
         socket.on('error', () => {
+            startup.abort();
+            clearTimeout(timer);
+            diagnose('socket_error');
             this.releasePendingSocket(socket);
             this.sessions.onDisconnect(socket);
             this.sockets.delete(socket);

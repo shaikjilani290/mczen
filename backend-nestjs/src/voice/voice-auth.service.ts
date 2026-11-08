@@ -17,6 +17,7 @@ export interface VoiceWidgetBinding {
   assistantId: string;
   conversationId: string;
   widgetSessionId: string;
+  merchant?: { integrationId: string; sessionId: string; origin: string };
 }
 
 export interface VoiceIdentity {

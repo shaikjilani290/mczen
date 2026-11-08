@@ -15,6 +15,7 @@ VOICES = (
 )
 PIPER_REVISION = "e7229f7d33a10e145e109b886d661984201ac3c4"
 WHISPER_REVISION = "536b0662742c02347bc0e980a01041f333bce120"
+WHISPER_BASE_EN_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c"
 SILERO_REVISION = "066409f3d9db45a30d21dfcbf9147826ffdd7052"
 
 
@@ -57,7 +58,7 @@ def download_silero(directory: Path):
         download(url, directory / target)
 
 
-def main(directory: Path):
+def main(directory: Path, english_model: str = "small"):
     directory.mkdir(parents=True, exist_ok=True)
     download_silero(directory / "silero")
     voices = directory / "piper"
@@ -75,10 +76,16 @@ def main(directory: Path):
     for filename in ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt", "README.md"):
         url = f"https://huggingface.co/Systran/faster-whisper-small/resolve/{WHISPER_REVISION}/{filename}?download=true"
         download(url, directory / "whisper-small" / filename)
+    if english_model == "base.en":
+        for filename in ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt", "README.md"):
+            url = f"https://huggingface.co/Systran/faster-whisper-base.en/resolve/{WHISPER_BASE_EN_REVISION}/{filename}?download=true"
+            download(url, directory / "whisper-base.en" / filename)
     print("All local speech models are ready.", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", type=Path, required=True)
-    main(parser.parse_args().directory.resolve())
+    parser.add_argument("--english-model", choices=("small", "base.en"), default="small")
+    args = parser.parse_args()
+    main(args.directory.resolve(), english_model=args.english_model)

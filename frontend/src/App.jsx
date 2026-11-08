@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AudioLines,
   Bot,
+  Globe,
   Languages,
   LogOut,
   Mic,
   MicOff,
   Plus,
   Send,
+  ShieldCheck,
+  Sparkles,
   Volume2,
   VolumeX,
   Wifi,
@@ -16,6 +19,12 @@ import {
 import { voiceApi } from "./voice/voiceApi.js";
 import { VoiceClient } from "./voice/voiceClient.js";
 import { getVoiceOptions, hasSpeechOutput, LANGUAGE_LABELS, mapTranscript } from "./voice/voiceCapabilities.js";
+
+const QUICK_PROMPTS = [
+  "What is McZEN?",
+  "Tips for better sleep",
+  "Nutrition advice for energy",
+];
 
 const STATUS_LABELS = {
   idle: "Ready when you are",
@@ -73,11 +82,27 @@ function SignIn({ onSignedIn }) {
 
   return (
     <main className="auth-page">
-      <section className="auth-card">
-        <div className="brand-mark">M</div>
-        <p className="eyebrow">YOUR AI COMPANION</p>
-        <h1>Welcome to McZEN</h1>
-        <p className="auth-copy">Sign in to continue to your private voice workspace.</p>
+      <section className="auth-shell">
+        <aside className="auth-visual">
+          <div className="auth-brand">
+            <span className="brand-mark">M</span>
+            <span><b>McZEN</b><small>VOICE COMPANION</small></span>
+          </div>
+          <div>
+            <h2>Talk to your knowledge, in your language.</h2>
+            <p>Ask by voice or text and hear grounded answers from your own workspace.</p>
+            <ul className="auth-features">
+              <li><Globe size={14} /> English, Hindi and Telugu — spoken replies</li>
+              <li><ShieldCheck size={14} /> Private workspace, isolated per tenant</li>
+              <li><Sparkles size={14} /> Answers grounded in your knowledge base</li>
+            </ul>
+          </div>
+          <span className="auth-visual-foot">McZEN AI · Voice assistant for everyday wellness</span>
+        </aside>
+        <section className="auth-card">
+          <p className="eyebrow">WELCOME BACK</p>
+          <h1>Sign in to McZEN</h1>
+          <p className="auth-copy">Continue to your private voice workspace.</p>
         {error && <div className="notice error-notice" role="alert">{error}</div>}
         {!login ? (
           <form onSubmit={submit} className="auth-form">
@@ -120,7 +145,11 @@ function SignIn({ onSignedIn }) {
             ))}
           </div>
         )}
-        <p className="auth-footnote">Your microphone is only used after you choose to start a voice session.</p>
+          <p className="auth-footnote">
+            <ShieldCheck size={15} />
+            Your microphone is only used after you choose to start a voice session.
+          </p>
+        </section>
       </section>
     </main>
   );
@@ -500,9 +529,14 @@ export default function App() {
 
           <div className={`voice-stage state-${clientState}`}>
             <div className={`voice-orb ${voiceActive ? "orb-active" : ""}`}>
-              <span className="orb-ring ring-one" />
+              <span className="orb-halo" />
+              <span className="orb-ring ring-three" />
               <span className="orb-ring ring-two" />
-              <span className="orb-core"><AudioLines size={30} strokeWidth={1.7} /></span>
+              <span className="orb-ring ring-one" />
+              <span className="orb-core"><AudioLines size={34} strokeWidth={1.7} /></span>
+            </div>
+            <div className={`waveform ${voiceActive ? "is-live" : ""}`} aria-hidden="true">
+              {Array.from({ length: 9 }).map((_, index) => <span key={index} />)}
             </div>
             <div className="voice-caption" aria-live="polite">
               <strong>{STATUS_LABELS[clientState] || STATUS_LABELS.idle}</strong>
@@ -573,6 +607,16 @@ export default function App() {
           {language === "auto" && voiceSettings && !canSpeakLanguage && (
             <div className="capability-note" role="status">
               Speech output is not available for the assistant’s configured default language. Text replies remain available.
+            </div>
+          )}
+
+          {!messages.length && !partial && (
+            <div className="quick-prompts">
+              {QUICK_PROMPTS.map((prompt) => (
+                <button key={prompt} type="button" onClick={() => setInput(prompt)}>
+                  {prompt}
+                </button>
+              ))}
             </div>
           )}
 

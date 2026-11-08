@@ -50,7 +50,7 @@ export class WidgetPublicController {
     const input = parsePublicSession(body);
     // request.ip keys the per-IP session limiter on the real client when the
     // trusted local proxy is configured; otherwise on the raw socket peer.
-    return this.widget.createSession(input.publicKey, origin, input.language, request.ip ?? request.socket.remoteAddress);
+    return this.widget.createSession(input.publicKey, origin, input.language, request.ip ?? request.socket.remoteAddress, input.assistantId);
   }
 
   @Post('message')

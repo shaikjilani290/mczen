@@ -12,6 +12,9 @@ export declare class VoiceCapabilitiesController {
         protocol: string;
         providers: {
             stt: {
+                configuredProvider?: "local" | "remote" | undefined;
+                localFallbackEnabled?: boolean | undefined;
+                timeoutMs?: number;
                 engine: string;
                 healthy: boolean;
             };

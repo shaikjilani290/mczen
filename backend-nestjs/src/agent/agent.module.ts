@@ -8,9 +8,10 @@ import { ToolAuditService } from './tools/tool-audit.service';
 import { ToolExecutorService } from './tools/tool-executor.service';
 import { ToolsModule } from '../tools/tools.module';
 import { ConversationsModule } from '../conversations/conversations.module';
+import { WebsiteDataModule } from '../website-integrations/website-data.module';
 
 @Module({
-  imports: [ToolsModule, ConversationsModule],
+  imports: [ToolsModule, ConversationsModule, WebsiteDataModule],
   controllers: [AgentController],
   providers: [
     AgentService,
