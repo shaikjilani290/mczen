@@ -966,9 +966,19 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                 await this.speakResponse(session, response, epoch, turnId);
             });
         }
-        catch {
+        catch (error) {
+            const ttsFailed = progress.generatingSpeech;
+            this.logger.error({
+                event: 'voice_turn_failed',
+                sessionId: session.id,
+                turnId,
+                epoch,
+                stage: ttsFailed ? 'tts' : 'agent',
+                failureCode: error instanceof voice_provider_util_1.VoiceProviderError
+                    ? error.code
+                    : error instanceof Error ? error.name : 'UNKNOWN',
+            });
             if (this.sessions.get(session.id) === session && session.epoch === epoch && session.turnId === turnId) {
-                const ttsFailed = progress.generatingSpeech;
                 this.sendError(session, ttsFailed ? 'TTS_UNAVAILABLE' : 'AGENT_UNAVAILABLE', ttsFailed ? 'Speech playback could not be generated. The answer is available as text.' : 'The assistant could not complete this turn.', true);
                 await this.resetTurn(session, 'recovered');
             }
@@ -978,6 +988,18 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         if (!response || typeof response.answer !== 'string' || response.answer.length > 32_000) {
             throw new Error('Invalid agent response.');
         }
+        this.logger.log({
+            event: 'voice_agent_response_ready',
+            sessionId: session.id,
+            turnId,
+            epoch,
+            success: response.success,
+            engine: response.model,
+            answerChars: response.answer.length,
+            sourceCount: response.sources.length,
+            productCount: response.products?.length ?? 0,
+            streamed: Boolean(streamedSentences),
+        });
         const sentences = splitSentences(response.answer);
         const sendResponse = (result) => this.sendEvent(session.socket, 'voice.assistant.response', {
             success: result.success,
@@ -997,6 +1019,16 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             this.sendEvent(session.socket, 'voice.assistant.text.delta', { delta: sentence, turnId }, session);
         }
         if (!streamedSentences && (!response.success || !sentences.length)) {
+            if (response.success && !sentences.length) {
+                this.logger.warn({
+                    event: 'voice_agent_response_empty',
+                    sessionId: session.id,
+                    turnId,
+                    epoch,
+                    engine: response.model,
+                    answerChars: response.answer.length,
+                });
+            }
             await this.finishSpokenTurn(session, epoch, turnId, 0);
             return;
         }
@@ -1019,6 +1051,17 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             ? session.context.settings.ttsVoice
             : configuredVoice;
         const rate = voiceSettings.rate ?? session.context.settings.speechRate;
+        this.logger.log({
+            event: 'voice_tts_request',
+            sessionId: session.id,
+            turnId,
+            epoch,
+            engine: this.tts.engineId,
+            voice: stringField(voice, 80),
+            language,
+            answerChars: streamedSentences ? undefined : response.answer.length,
+            sentenceCount: (streamedSentences ? undefined : sentences.length),
+        });
         const ttsAbort = new AbortController();
         session.ttsAbort = ttsAbort;
         session.state = 'speaking';
@@ -1029,7 +1072,9 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         let announced = false;
         const ttsStarted = performance.now();
         let firstAudioMs;
+        let sentenceIndex = 0;
         for await (const sentence of streamedSentences ?? sentences) {
+            sentenceIndex++;
             const request = {
                 text: sentence,
                 language,
@@ -1042,32 +1087,59 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
             const iterable = voice.startsWith('clone:') && this.library
                 ? this.library.synthesize(session.context.agent.tenantId, request)
                 : this.tts.synthesize(request);
-            for await (const chunk of iterable) {
-                if (!this.isCurrentTurn(session, epoch, turnId) || ttsAbort.signal.aborted) {
-                    await this.recordEvent(session, 'late_agent_response_discarded', 'stale_tts_chunk');
-                    return;
+            let sentenceBytes = 0;
+            try {
+                for await (const chunk of iterable) {
+                    if (!this.isCurrentTurn(session, epoch, turnId) || ttsAbort.signal.aborted) {
+                        await this.recordEvent(session, 'late_agent_response_discarded', 'stale_tts_chunk');
+                        return;
+                    }
+                    sampleRate = chunk.sampleRate;
+                    totalBytes += chunk.data.length;
+                    sentenceBytes += chunk.data.length;
+                    if (totalBytes > sampleRate * 2 * 60) {
+                        throw new Error('TTS output limit exceeded.');
+                    }
+                    if (!announced) {
+                        firstAudioMs = performance.now() - ttsStarted;
+                        this.logger.log({ event: 'voice_first_audio', sessionId: session.id, turnId,
+                            endpointToFirstAudioMs: session.timing?.endpointAt === undefined
+                                ? undefined : performance.now() - session.timing.endpointAt });
+                        this.sendEvent(session.socket, 'voice.assistant.audio.chunk', {
+                            epoch,
+                            turnId,
+                            encoding: 'pcm_s16le',
+                            sampleRate,
+                            frames: 0,
+                            ttsFirstAudioMs: firstAudioMs,
+                        }, session);
+                        announced = true;
+                    }
+                    this.sendPcmChunks(session, chunk.data, epoch);
                 }
-                sampleRate = chunk.sampleRate;
-                totalBytes += chunk.data.length;
-                if (totalBytes > sampleRate * 2 * 60) {
-                    throw new Error('TTS output limit exceeded.');
-                }
-                if (!announced) {
-                    firstAudioMs = performance.now() - ttsStarted;
-                    this.logger.log({ event: 'voice_first_audio', sessionId: session.id, turnId,
-                        endpointToFirstAudioMs: session.timing?.endpointAt === undefined
-                            ? undefined : performance.now() - session.timing.endpointAt });
-                    this.sendEvent(session.socket, 'voice.assistant.audio.chunk', {
-                        epoch,
-                        turnId,
-                        encoding: 'pcm_s16le',
-                        sampleRate,
-                        frames: 0,
-                        ttsFirstAudioMs: firstAudioMs,
-                    }, session);
-                    announced = true;
-                }
-                this.sendPcmChunks(session, chunk.data, epoch);
+                this.logger.log({
+                    event: 'voice_tts_sentence_completed',
+                    sessionId: session.id,
+                    turnId,
+                    sentenceIndex,
+                    sentenceChars: sentence.length,
+                    audioBytes: sentenceBytes,
+                    status: sentenceBytes > 0 ? 'audio_generated' : 'empty_audio',
+                });
+            }
+            catch (error) {
+                this.logger.error({
+                    event: 'voice_tts_sentence_failed',
+                    sessionId: session.id,
+                    turnId,
+                    sentenceIndex,
+                    sentenceChars: sentence.length,
+                    audioBytes: sentenceBytes,
+                    failureCode: error instanceof voice_provider_util_1.VoiceProviderError
+                        ? error.code
+                        : error instanceof Error ? error.name : 'UNKNOWN',
+                });
+                throw error;
             }
         }
         if (!this.isCurrentTurn(session, epoch, turnId) || ttsAbort.signal.aborted)
@@ -1170,16 +1242,48 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
     }
     sendPcmChunks(session, data, epoch) {
         const socket = session.socket;
-        if (!socket || socket.readyState !== ws_1.WebSocket.OPEN)
+        if (!socket || socket.readyState !== ws_1.WebSocket.OPEN) {
+            this.logger.warn({
+                event: 'voice_audio_not_sent',
+                sessionId: session.id,
+                turnId: session.turnId,
+                epoch,
+                audioBytes: data.length,
+                socketState: socket?.readyState ?? 'missing',
+            });
             return;
+        }
+        let sentBytes = 0;
+        let sentFrames = 0;
         for (let offset = 0; offset < data.length; offset += MAX_PAYLOAD_BYTES) {
-            if (session.epoch !== epoch)
+            if (session.epoch !== epoch) {
+                this.logger.warn({
+                    event: 'voice_audio_not_sent',
+                    sessionId: session.id,
+                    turnId: session.turnId,
+                    epoch,
+                    audioBytes: data.length,
+                    sentBytes,
+                    sentFrames,
+                    reason: 'stale_epoch',
+                });
                 return;
+            }
             let length = Math.min(MAX_PAYLOAD_BYTES, data.length - offset);
             length &= ~1;
             if (length < 2)
                 continue;
             if (socket.bufferedAmount + HEADER_BYTES + length > 353_000) {
+                this.logger.warn({
+                    event: 'voice_audio_not_sent',
+                    sessionId: session.id,
+                    turnId: session.turnId,
+                    epoch,
+                    audioBytes: data.length,
+                    sentBytes,
+                    sentFrames,
+                    reason: 'egress_backpressure',
+                });
                 this.sendError(session, 'EGRESS_BACKPRESSURE', 'Audio output is temporarily paused.', true);
                 session.ttsAbort?.abort();
                 return;
@@ -1194,12 +1298,33 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
                 socket.send(frame, { binary: true });
             }
             catch {
-                this.logger.warn(JSON.stringify({ event: 'voice_audio_send_failed', sessionId: session.id }));
+                this.logger.warn({
+                    event: 'voice_audio_send_failed',
+                    sessionId: session.id,
+                    turnId: session.turnId,
+                    epoch,
+                    audioBytes: data.length,
+                    sentBytes,
+                    sentFrames,
+                    eventType: 'binary_audio_frame',
+                });
                 session.ttsAbort?.abort();
                 return;
             }
             session.outgoingSequence = (session.outgoingSequence + 1) >>> 0;
+            sentBytes += length;
+            sentFrames++;
         }
+        this.logger.log({
+            event: 'voice_audio_sent',
+            sessionId: session.id,
+            turnId: session.turnId,
+            epoch,
+            eventType: 'binary_audio_frame',
+            audioBytes: sentBytes,
+            frameCount: sentFrames,
+            status: sentBytes > 0 ? 'sent' : 'empty',
+        });
     }
     async closeSession(session, reason, errorCode = null) {
         if (session.state === 'closed')
@@ -1357,8 +1482,25 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         this.sendEvent(session.socket, 'voice.session.error', { code, message, recoverable, epoch: session.epoch }, session);
     }
     sendEvent(socket, type, data, session) {
-        if (!socket || socket.readyState !== ws_1.WebSocket.OPEN)
+        const traceEvent = [
+            'voice.transcript.final',
+            'voice.assistant.response',
+            'voice.assistant.audio.chunk',
+            'voice.assistant.audio.end',
+            'voice.assistant.turn.end',
+            'voice.session.error',
+        ].includes(type);
+        if (!socket || socket.readyState !== ws_1.WebSocket.OPEN) {
+            if (traceEvent)
+                this.logger.warn({
+                    event: 'voice_websocket_event_not_sent',
+                    sessionId: session?.id ?? null,
+                    turnId: typeof data.turnId === 'string' ? data.turnId : undefined,
+                    type,
+                    socketState: socket?.readyState ?? 'missing',
+                });
             return;
+        }
         const event = {
             v: 1,
             type,
@@ -1368,13 +1510,24 @@ let VoiceSessionManager = VoiceSessionManager_1 = class VoiceSessionManager {
         };
         try {
             socket.send(JSON.stringify(event));
+            if (traceEvent)
+                this.logger.log({
+                    event: 'voice_websocket_event_sent',
+                    sessionId: session?.id ?? null,
+                    turnId: typeof data.turnId === 'string' ? data.turnId : undefined,
+                    type,
+                    answerChars: typeof data.answer === 'string' ? data.answer.length : undefined,
+                    epoch: session?.epoch ?? null,
+                });
         }
         catch {
-            this.logger.warn(JSON.stringify({
+            this.logger.warn({
                 event: 'voice_event_send_failed',
                 sessionId: session?.id ?? null,
                 type,
-            }));
+                turnId: typeof data.turnId === 'string' ? data.turnId : undefined,
+                epoch: session?.epoch ?? null,
+            });
         }
     }
     fail(socket, code, message, closeCode) {

@@ -12,14 +12,15 @@ const website_integration_repository_1 = require("./website-integration.reposito
 const merchant_cart_service_1 = require("./merchant-cart.service");
 const shared_state_module_1 = require("../shared-state/shared-state.module");
 const product_identity_service_1 = require("./product-identity.service");
+const website_knowledge_engine_1 = require("./website-knowledge.engine");
 let WebsiteDataModule = class WebsiteDataModule {
 };
 exports.WebsiteDataModule = WebsiteDataModule;
 exports.WebsiteDataModule = WebsiteDataModule = __decorate([
     (0, common_1.Module)({
         imports: [shared_state_module_1.SharedStateModule],
-        providers: [website_integration_repository_1.WebsiteIntegrationRepository, merchant_cart_service_1.MerchantCartService, product_identity_service_1.ProductIdentityService],
-        exports: [website_integration_repository_1.WebsiteIntegrationRepository, merchant_cart_service_1.MerchantCartService, product_identity_service_1.ProductIdentityService],
+        providers: [website_integration_repository_1.WebsiteIntegrationRepository, merchant_cart_service_1.MerchantCartService, product_identity_service_1.ProductIdentityService, website_knowledge_engine_1.WebsiteKnowledgeEngine],
+        exports: [website_integration_repository_1.WebsiteIntegrationRepository, merchant_cart_service_1.MerchantCartService, product_identity_service_1.ProductIdentityService, website_knowledge_engine_1.WebsiteKnowledgeEngine],
     })
 ], WebsiteDataModule);
 //# sourceMappingURL=website-data.module.js.map

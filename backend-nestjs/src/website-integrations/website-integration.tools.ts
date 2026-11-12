@@ -61,7 +61,14 @@ export function createWebsiteIntegrationTools(repository: WebsiteIntegrationRepo
           throw new BadRequestException('pageType is invalid.');
         }
         const type = typeof args.pageType === 'string' ? args.pageType : null;
-        const rows = await repository.searchPages(context.tenantId, context.assistantId, query, type, limit(args.limit));
+        const rows = await repository.searchPages(
+          context.tenantId,
+          context.assistantId,
+          query,
+          type,
+          limit(args.limit),
+          context.merchant?.integrationId,
+        );
         return { pages: rows };
       },
     },
@@ -187,7 +194,14 @@ export function createWebsiteIntegrationTools(repository: WebsiteIntegrationRepo
         assertNotAborted(signal);
         if (!context.assistantId) return { faqs: [] };
         return {
-          faqs: await repository.searchPages(context.tenantId, context.assistantId ?? '', ensureQuery(args.query), 'faq', limit(args.limit)),
+          faqs: await repository.searchPages(
+            context.tenantId,
+            context.assistantId ?? '',
+            ensureQuery(args.query),
+            'faq',
+            limit(args.limit),
+            context.merchant?.integrationId,
+          ),
         };
       },
     },

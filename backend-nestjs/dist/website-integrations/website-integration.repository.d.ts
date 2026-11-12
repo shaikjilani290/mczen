@@ -66,7 +66,7 @@ export declare class WebsiteIntegrationRepository {
     pageCounts(tenantId: string, integrationId: string): Promise<{
         pageViews: number;
     }>;
-    searchPages(tenantId: string, assistantId: string, query: string, type: string | null, limit: number): Promise<Row[]>;
+    searchPages(tenantId: string, assistantId: string, query: string, type: string | null, limit: number, integrationId?: string): Promise<Row[]>;
     searchProducts(tenantId: string, assistantId: string, input: {
         query?: string;
         category?: string;
@@ -82,5 +82,6 @@ export declare class WebsiteIntegrationRepository {
         name: string;
     }>>;
     listKnowledge(tenantId: string, integrationId: string, page?: number, pageSize?: number): Promise<Row[]>;
+    pagesForReindex(tenantId: string, integrationId: string): Promise<Row[]>;
 }
 export {};

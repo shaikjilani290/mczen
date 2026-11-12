@@ -89,6 +89,49 @@ For a normal demo user in the same workspace, run
 management permissions, and leaves existing accounts unchanged. Use the main
 application login at `/`, not the platform-administrator mode.
 
+## Website knowledge engine
+
+Website chat and voice use the same deterministic website-answer service. It
+retrieves public pages from the tenant/assistant-scoped MySQL FULLTEXT
+knowledge index, expands common wording (for example, “money back” to refund
+and return terms), scores the returned titles and excerpts, and answers from
+those records with their source URLs. Product details, comparisons, prices,
+stock, and availability are queried directly from the connected catalogue
+tables at request time rather than read from the article/chunk index. Missing
+facts are called out instead of inferred. Product variants are not represented
+by the current catalogue schema and are therefore reported as unavailable.
+
+Website pages and products are imported through the authenticated
+`/api/website-ingestion/{pages,products,batch}` endpoints; the crawler ingests
+pages and the connected-site SDK can submit products. Repeated URLs and product
+IDs are upserted; content hashes avoid rebuilding unchanged page chunks. Tenant ownership is enforced in every
+search and write query. Website administrators can inspect sync status, errors,
+pages, products, and indexed pages through
+`/api/website-integrations/:id/status`, `/pages`, `/products`, and `/knowledge`.
+`POST /api/website-integrations/:id/sync` starts a crawl; the new
+`POST /api/website-integrations/:id/rebuild-index` re-chunks already stored
+active pages without touching product/catalogue data.
+
+With `AGENT_RESPONSE_MODE=no-llm` (the default), routine website questions do not call Ollama. Complex merchant questions may
+use the existing model path only when `OLLAMA_FALLBACK_ENABLED=true`; its
+default is `false`. The current MySQL deployment provides FULLTEXT/ngram
+retrieval but has no embedding model or vector-index service, so there is no
+embedding/vector search configured. The engine uses explicit synonym
+expansion and relevance ranking over FULLTEXT candidates instead.
+
+Set `AGENT_RESPONSE_MODE=conversational` to restore model-generated dialogue for
+greetings, grounded product explanations, ingredients, comparisons, website
+answers and general wellness education. Both typed chat and voice use the same
+agent service. The existing provider settings select native Ollama
+(`LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`) or the already supported
+Qwen GPU service (`LLM_PROVIDER=openai-compatible`, `LLM_BASE_URL`, `LLM_MODEL`).
+Conversational mode requires a reachable model; it does not silently substitute
+raw retrieval text on failure. Cart actions still require verified merchant
+confirmation. Raw tool results remain auditable; customer answers are validated
+before display or synthesis. Selected-product follow-ups retain a bounded recent
+history and retrieve the selected product again rather than relying on model memory
+for its facts. Historical catalogue inventory must not be presented as live.
+
 ## McZEN agent runtime (Phase 5 — historical verification)
 
 Run from `backend-nestjs` with Node.js 22+ and the existing local Ollama model.
@@ -98,6 +141,7 @@ the local defaults:
 
 | Setting | Default | Validation |
 | --- | --- | --- |
+| `AGENT_RESPONSE_MODE` | `no-llm` | `no-llm` or `conversational`; model choice still uses `LLM_PROVIDER` |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | HTTP(S), no embedded credentials, query or fragment |
 | `OLLAMA_MODEL` | `qwen2.5:3b` | Nonempty bounded model identifier |
 | `OLLAMA_TIMEOUT_MS` | `120000` | Integer, 1000–300000 ms, including response-body reading |

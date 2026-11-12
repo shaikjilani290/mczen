@@ -12,10 +12,55 @@ The transport rate limit is 40 audio packets/s. Current browser capture sends
 100 ms / 3,200-byte PCM packets with acknowledged bounded backpressure. The
 gateway batches complete 20 ms frames for VAD; it does not change the sample rate.
 
+## Current local voice verification
+
+These are synthetic-speech integration checks, not human microphone tests.
+The existing `.env` was not changed and no credentials or remote host details
+are recorded here.
+
+- While the configured SSH forwards were available, authenticated GPU STT
+  health reported `large-v3`, CUDA and `int8_float32`. A generated English
+  Dhvaani WAV was transcribed through `/transcribe`; the transcript matched
+  the generated phrase and the response matched the configured adapter
+  contract. The 2.96-second clip reported 1.124 seconds of processing.
+- Dhvaani health returned HTTP 200 and `/voices` listed `my_voice`. English,
+  Hindi and Telugu synthesis requests returned WAV audio at 24 kHz. English
+  generated audio completed Windows playback and matched its Whisper
+  transcription. Hindi and Telugu generated clips produced only fragmentary
+  Whisper transcripts, so their spoken-language accuracy is not verified.
+- No GPU VAD forward was found. The local CPU Silero sidecar on port 8002
+  passed real inference on generated speech (speech detected, probability
+  0.888; five 20 ms frames; 6.9 ms native inference after warm-up).
+- A separate local widget WebSocket test passed with CPU Piper, CPU
+  Faster-Whisper `base.en`, local Silero and the deterministic knowledge
+  engine. Text and voice returned identical catalogue answers and five
+  sources; generated response audio completed Windows playback. The reported
+  model was `website-knowledge-engine`, with Ollama fallback disabled. This
+  verifies the local CPU path, not the remote GPU path.
+- The full widget WebSocket round trip using GPU STT and Dhvaani remains
+  unverified. The authorized forwards were re-established briefly; initial
+  STT and Dhvaani health probes returned HTTP 200. While the local API and
+  Silero VAD were brought up, ports 28000 and 28003 closed again before a new
+  inference or widget voice session could run. The forwards could not be kept
+  open for the test. The API's MySQL/audit/shared-state readiness and local
+  VAD health both passed. No test conversation was created and no customer
+  data was changed in this attempt.
+- A local CPU Whisper-small attempt exceeded its 45-second client deadline;
+  the cached English `base.en` model was then used for the successful local
+  English test. No customer microphone audio was recorded.
+
+The previously observed local forwards were `127.0.0.1:28000` to remote
+loopback port 18000 (STT) and `127.0.0.1:28003` to remote loopback port 18003
+(Dhvaani). These are temporary developer forwards, not production endpoints.
+Keep them open through the full test before attempting the remote WebSocket
+round trip; do not put SSH credentials or API keys in this document or
+frontend configuration.
+
 ## Optional remote GPU STT
 
-The existing adapter supports the Paperspace Whisper Small API as well as the
-same Colab-compatible contract; no second STT pipeline is needed.
+The existing adapter supports an explicitly configured remote Whisper endpoint
+that conforms to its multipart and response contract; no second STT pipeline
+is needed.
 
 STT is still injected through the single `SPEECH_TO_TEXT` port. With no new
 configuration, it delegates to the unchanged local Faster Whisper adapter,
@@ -69,7 +114,7 @@ supported language and finite nonnegative `audio_duration`/`processing_time`
 are required. The exact transcript and returned language become internal
 `text`/`language`, `isFinal` follows the request, and seconds of
 `processing_time` become `processingMs`. `speed`, `device`, `model` and
-Paperspace's additional `compute_type` are
+provider-specific fields such as `compute_type` are
 informational, not trusted confidence scores or fabricated per-stage timings.
 The API supplies no decoder-quality score: this integration cannot manufacture
 the local provider's recognition-quality metadata. Existing downstream
@@ -111,9 +156,10 @@ same turn's final transcript and AgentService request. A successful browser
 turn accompanied by `voice_remote_stt_failed` and local Whisper timing proves
 fallback, not GPU inference. Use explicitly authorized generated audio for
 transport checks; it does not establish human microphone accuracy.
-The implementation report records the actual Paperspace checks and remaining
-authentication blocker. Live language-hint accuracy, human recognition and
-remote data-retention controls require their own acceptance evidence.
+Live language-hint accuracy, human recognition and remote data-retention
+controls require their own acceptance evidence. See the current local voice
+verification above for the tests performed against the discovered GPU
+services and the remaining tunnel and multilingual-quality limitations.
 
 ## Local provider sidecars
 

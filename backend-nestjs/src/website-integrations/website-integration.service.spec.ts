@@ -152,4 +152,31 @@ describe('authenticated local website ingestion', () => {
     expect(begin).not.toHaveBeenCalled();
     expect(crawl).not.toHaveBeenCalled();
   });
+
+  it('rebuilds active website page chunks without modifying imported products', async () => {
+    const articleId = uuidToBinary(newUuidv7());
+    jest.spyOn(repository, 'record').mockResolvedValue(recordA);
+    jest.spyOn(repository, 'pagesForReindex').mockResolvedValue([{
+      article_id: articleId,
+      title: 'Returns',
+      summary: 'Return information',
+      content: 'Items may be returned within thirty days.',
+      language_code: 'en',
+    }]);
+    const refresh = jest.spyOn(repository, 'refreshCounts').mockResolvedValue();
+
+    const result = await tenantContextStore.run({
+      tenantId: recordA.tenantId, actorType: 'user', permissions: ['tenants:write'],
+    }, () => service.rebuildIndex(recordA.id));
+
+    expect(result).toEqual({ id: recordA.id, status: 'completed', indexed: 1 });
+    expect(replaceChunks).toHaveBeenCalledWith(
+      expect.anything(),
+      { articleId },
+      expect.arrayContaining([expect.stringContaining('Items may be returned within thirty days.')]),
+      'en',
+    );
+    expect(refresh).toHaveBeenCalledWith(recordA.tenantId, recordA.id);
+    expect(upsertProduct).not.toHaveBeenCalled();
+  });
 });

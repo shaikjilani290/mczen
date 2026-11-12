@@ -30,6 +30,11 @@ export declare class WebsiteIntegrationAdminController {
         id: string;
         syncStatus: "running";
     }>;
+    rebuildIndex(id: string): Promise<{
+        id: string;
+        status: "completed";
+        indexed: number;
+    }>;
     rotateKeys(id: string): Promise<{
         publicKey: string;
         ingestionKey: string;

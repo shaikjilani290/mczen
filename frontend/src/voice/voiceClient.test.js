@@ -416,33 +416,34 @@ test("flow control bounds in-flight audio, preserves order through congestion an
       now += 100;
       client.flushCapture();
     }
-    assert.equal(frames().length, 5, "backend credits cap unprocessed audio at 500 ms");
-    assert.equal(client.pendingSamples.length, 8000, "unsent speech is retained");
+    assert.equal(frames().length, 1, "catch-up batching waits for enough credits for the next batch");
+    assert.equal([...client.inFlight.values()].reduce((sum, f) => sum + f.bytes, 0), 12800);
+    assert.equal(client.pendingSamples.length, 9600, "unsent speech is retained");
     socket.bufferedAmount = 6401;
     await client.handleMessage(JSON.stringify({ v: 1, type: "voice.audio.ack", epoch: 1,
       data: { sequence: 0, paused: false, queueMs: 200 } }));
-    assert.equal(frames().length, 5, "congested WebSocket pauses sending");
-    assert.equal(client.sequence, 5, "unsent audio does not consume sequence numbers");
+    assert.equal(frames().length, 1, "congested WebSocket pauses sending");
+    assert.equal(client.sequence, 1, "unsent audio does not consume sequence numbers");
     socket.bufferedAmount = 0;
     now += 100;
     client.flushCapture();
-    assert.equal(frames().length, 6);
-    assert.equal(new DataView(frames()[5]).getInt16(11, true), Math.round(8000 / 32000 * 32767));
+    assert.equal(frames().length, 2);
+    assert.equal(new DataView(frames()[1]).getInt16(11, true), Math.round(6400 / 32000 * 32767));
     await client.handleMessage(JSON.stringify({ v: 1, type: "voice.audio.flow", data: { paused: true } }));
     now += 100;
     client.flushCapture();
-    assert.equal(frames().length, 6);
+    assert.equal(frames().length, 2);
     await client.handleMessage(JSON.stringify({
       v: 1, type: "voice.assistant.epoch", epoch: 2, data: { reason: "turn_reset" },
     }));
     assert.equal(client.pendingSamples.length, 0);
     client.flushCapture();
-    assert.equal(frames().length, 6, "prior-turn audio is not sent in the new epoch");
+    assert.equal(frames().length, 2, "prior-turn audio is not sent in the new epoch");
     assert.equal(client.inFlight.size, 0);
     assert.deepEqual(errors, [], "backpressure does not discard or warn while bounded");
     await client.stop();
     t.mock.timers.tick(500);
-    assert.equal(frames().length, 6, "stop cancels the audio sender");
+    assert.equal(frames().length, 2, "stop cancels the audio sender");
   } finally {
     await client.stop();
     t.mock.timers.reset();
@@ -451,14 +452,35 @@ test("flow control bounds in-flight audio, preserves order through congestion an
 
 test("capture overflow stops the session explicitly rather than silently dropping speech", async () => {
   const errors = [];
-  const client = new VoiceClient({ onError: (message) => errors.push(message) });
+  const diagnostics = [];
+  const client = new VoiceClient({
+    onError: message => errors.push(message), onDiagnostic: event => diagnostics.push(event),
+  });
   client.shouldReconnect = true;
   client.pendingSamples = new Float32Array(32000);
   client.captureOverflow();
   await new Promise(setImmediate);
-  assert.match(errors[0], /2-second buffer.*stopped.*incomplete speech/);
+  assert.match(errors[0], /browser.*2-second buffer.*stopped.*incomplete speech/);
+  assert.equal(diagnostics.at(-1).stage, "capture_buffer_overflow");
+  assert.equal(diagnostics.at(-1).serverPaused, false);
+  assert.equal(diagnostics.at(-1).pendingMs, 2000);
   assert.equal(client.shouldReconnect, false);
   assert.equal(client.pendingSamples.length, 0);
+});
+
+test("capture overflow identifies backend backpressure without blaming the browser", async () => {
+  const errors = [];
+  const diagnostics = [];
+  const client = new VoiceClient({
+    onError: message => errors.push(message), onDiagnostic: event => diagnostics.push(event),
+  });
+  client.serverPaused = true;
+  client.captureOverflow({ source: "AudioWorklet", bufferedMs: 2000 });
+  await new Promise(setImmediate);
+  assert.match(errors[0], /voice service was congested/);
+  assert.equal(diagnostics.at(-1).serverPaused, true);
+  assert.equal(diagnostics.at(-1).source, "AudioWorklet");
+  assert.equal(diagnostics.at(-1).bufferedMs, 2000);
 });
 
 test("delayed polling cannot throttle backlog recovery below real time", (t) => {
@@ -477,9 +499,10 @@ test("delayed polling cannot throttle backlog recovery below real time", (t) => 
       now += 50;
       t.mock.timers.tick(50);
     }
-    assert.equal(packets.length, 10, "one second of delayed audio drains in 450 ms, not a drifting second");
+    assert.equal(packets.length, 3, "one second of delayed audio drains in three bounded batches");
+    assert.deepEqual(packets.map(p => p.byteLength - 11), [12800, 12800, 6400]);
     assert.equal(client.pendingSamples.length, 0);
-    assert.deepEqual(packets.map((p) => new DataView(p).getUint32(5)), Array.from({ length: 10 }, (_, i) => i));
+    assert.deepEqual(packets.map((p) => new DataView(p).getUint32(5)), [0, 1, 2]);
   } finally {
     t.mock.timers.reset();
   }
@@ -503,9 +526,9 @@ test("coalesces delayed worklet packets without exceeding backend byte credits",
       now += 100;
       client.flushCapture();
     }
-    assert.deepEqual(packets.map((p) => p.byteLength - 11), [6400, 6400, 3200]);
-    assert.equal([...client.inFlight.values()].reduce((sum, f) => sum + f.bytes, 0), 16000);
-    assert.equal(client.pendingFrames.length, 1, "last frame waits rather than exceeding 500 ms in flight");
+    assert.deepEqual(packets.map((p) => p.byteLength - 11), [6400, 6400]);
+    assert.equal([...client.inFlight.values()].reduce((sum, f) => sum + f.bytes, 0), 12800);
+    assert.equal(client.pendingFrames.length, 2, "backlog waits for batch credits rather than fragmenting it");
     const first = new DataView(packets[0]);
     assert.equal(first.getInt16(11, true), 0);
     assert.equal(first.getInt16(11 + 3200, true), 1);
@@ -513,6 +536,82 @@ test("coalesces delayed worklet packets without exceeding backend byte credits",
     t.mock.timers.reset();
   }
 });
+
+for (const latencyMs of [300, 375]) {
+test(`sustained ${latencyMs} ms VAD round trips drain microphone audio without overflowing or dropping samples`, async t => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let Processor;
+  let client;
+  const errors = [];
+  const packets = [];
+  let backendAvailableAt = 0;
+  runInNewContext(captureWorkletSource, {
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = {
+          postMessage(data) {
+            if (data.type === "overflow") return client.captureOverflow();
+            if (data.type !== "audio") return;
+            client.pendingFrames.push({ pcm: new Int16Array(data.pcm), capturedAt: now });
+            client.flushCapture();
+          },
+        };
+      }
+    },
+    sampleRate: 16000, currentTime: 0,
+    registerProcessor: (_name, value) => { Processor = value; },
+  });
+  const processor = new Processor({});
+  client = new VoiceClient({ onError: message => errors.push(message) });
+  client.shouldReconnect = true;
+  client.flowControl = true;
+  client.processor = { port: { postMessage: data => processor.port.onmessage({ data }), close() {} }, disconnect() {} };
+  client.socket = {
+    readyState: 1, bufferedAmount: 0,
+    send(packet) {
+      if (!(packet instanceof ArrayBuffer)) return;
+      packets.push(packet);
+      backendAvailableAt = Math.max(now, backendAvailableAt) + latencyMs;
+      const sequence = new DataView(packet).getUint32(5);
+      setTimeout(() => void client.handleMessage(JSON.stringify({
+        v: 1, type: "voice.audio.ack", epoch: 0, data: { sequence, paused: false },
+      })), backendAvailableAt - now);
+    },
+    close() { this.readyState = 3; },
+  };
+  const totalSamples = 16000 * 20;
+  try {
+    for (let offset = 0; offset < totalSamples && client.shouldReconnect; offset += 128) {
+      processor.process([[Float32Array.from({ length: 128 }, (_, i) =>
+        ((offset + i) % 1000) / 2000)]]);
+      now += 8;
+      t.mock.timers.tick(8);
+      assert.ok([...client.inFlight.values()].reduce((sum, frame) => sum + frame.bytes, 0) <= 16000);
+      assert.ok(processor.count <= 32000);
+    }
+    for (let i = 0; i < 250 && client.shouldReconnect; i++) {
+      processor.process([[new Float32Array(0)]]);
+      now += 8;
+      t.mock.timers.tick(8);
+    }
+    assert.deepEqual(errors, []);
+    assert.equal(client.shouldReconnect, true);
+    const sentSamples = packets.flatMap(packet => {
+      const view = new DataView(packet);
+      return Array.from({ length: (packet.byteLength - 11) / 2 }, (_, i) => view.getInt16(11 + i * 2, true));
+    });
+    assert.equal(sentSamples.length, totalSamples);
+    for (let i = 0; i < sentSamples.length; i++) {
+      assert.equal(sentSamples[i], Math.round(Math.fround((i % 1000) / 2000) * 32767));
+    }
+  } finally {
+    client.shouldReconnect = false;
+    t.mock.timers.reset();
+  }
+});
+}
 
 test("AudioWorklet preserves sample order and resampling phase, bounds its credit queue and reports overflow", () => {
   function worklet(rate, diagnostics = false) {
@@ -538,8 +637,8 @@ test("AudioWorklet preserves sample order and resampling phase, bounds its credi
   assert.equal(audio.at(-1).pcm.at(-1), -8192);
   assert.ok(audio.every((m) => m.pcm.length === 1600 && m.epoch === 1));
   const slow = worklet(16000);
-  for (let i = 0; i < 300; i++) slow.processor.process([[new Float32Array(128)]]);
-  assert.equal(slow.messages.filter((m) => m.type === "audio").length, 2, "only two uncredited MessagePort packets are allowed");
+  for (let i = 0; i < 320; i++) slow.processor.process([[new Float32Array(128)]]);
+  assert.equal(slow.messages.filter((m) => m.type === "audio").length, 4, "only four uncredited MessagePort packets are allowed");
   assert.equal(slow.messages.filter((m) => m.type === "overflow").length, 1);
   assert.equal(slow.processor.count, 32000);
   assert.equal(messages.some(m => m.type === "diagnostics"), false, "raw capture has no metadata overhead by default");
@@ -668,6 +767,80 @@ test("lets scheduled speech finish on normal turn reset while rejecting stale pa
   assert.equal(next.stopped, true);
   assert.equal(client.playing.size, 0);
   await client.stop();
+});
+
+test("records response correlation and confirms browser audio playback completion", async () => {
+  const diagnostics = [];
+  const events = [];
+  const audio = fakeAudioContext();
+  const client = new VoiceClient({
+    onDiagnostic: (event) => diagnostics.push(event),
+    onEvent: (event) => events.push(event),
+  });
+  client.audioContext = audio;
+  client.sessionId = "voice-session";
+  client.epoch = 4;
+
+  await client.handleMessage(JSON.stringify({
+    v: 1,
+    type: "voice.assistant.response",
+    sessionId: "voice-session",
+    epoch: 4,
+    data: { turnId: "turn-1", answer: "A grounded answer.", success: true },
+  }));
+  assert.equal(events.at(-1).data.answer, "A grounded answer.");
+  assert.equal(diagnostics.find((event) => event.stage === "assistant_response_received").answerChars, 18);
+
+  client.queuePlayback({ epoch: 4, sequence: 12, pcm: new Int16Array(1600) });
+  const source = audio.createdSources[0];
+  assert.ok(source);
+  assert.equal(diagnostics.at(-1).stage, "audio_playback_started");
+  source.onended();
+  assert.equal(diagnostics.at(-1).stage, "audio_playback_ended");
+  assert.equal(diagnostics.at(-1).playbackStatus, "played");
+});
+
+test("reports playback rejection instead of silently dropping a response", () => {
+  const diagnostics = [];
+  const errors = [];
+  const audio = fakeAudioContext();
+  audio.createBufferSource = () => ({
+    connect() {},
+    start() { throw new Error("Audio output rejected."); },
+    stop() {},
+  });
+  const client = new VoiceClient({
+    audioContextFactory: () => audio,
+    onDiagnostic: (event) => diagnostics.push(event),
+    onError: (message) => errors.push(message),
+  });
+  client.audioContext = audio;
+  client.epoch = 2;
+  client.queuePlayback({ epoch: 2, sequence: 0, pcm: new Int16Array(160) });
+
+  assert.equal(diagnostics.at(-1).stage, "audio_playback_failed");
+  assert.equal(diagnostics.at(-1).playbackStatus, "not_played");
+  assert.match(errors[0], /could not be played/);
+  assert.equal(client.playing.size, 0);
+});
+
+test("drops events from a different voice session with a correlation diagnostic", async () => {
+  const diagnostics = [];
+  const events = [];
+  const client = new VoiceClient({
+    onDiagnostic: (event) => diagnostics.push(event),
+    onEvent: (event) => events.push(event),
+  });
+  client.sessionId = "current-session";
+  await client.handleMessage(JSON.stringify({
+    v: 1,
+    type: "voice.assistant.response",
+    sessionId: "other-session",
+    data: { turnId: "turn-1", answer: "stale", success: true },
+  }));
+
+  assert.equal(events.length, 0);
+  assert.equal(diagnostics.at(-1).stage, "voice_event_session_mismatch_dropped");
 });
 
 test("real VAD speech stops buffered output even after server generation has reset its epoch", async () => {

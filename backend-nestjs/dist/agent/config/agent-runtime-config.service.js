@@ -47,6 +47,10 @@ function validatedBaseUrl(raw, settingName) {
     return parsedUrl.href.replace(/\/+$/, '');
 }
 function readAgentRuntimeConfig(env) {
+    const responseMode = env['AGENT_RESPONSE_MODE'] ?? 'no-llm';
+    if (responseMode !== 'no-llm' && responseMode !== 'conversational') {
+        return invalidSetting('AGENT_RESPONSE_MODE');
+    }
     const provider = env['LLM_PROVIDER'] ?? 'ollama';
     if (provider !== 'ollama' && provider !== 'openai-compatible') {
         return invalidSetting('LLM_PROVIDER');
@@ -61,12 +65,18 @@ function readAgentRuntimeConfig(env) {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(llmModel)) {
         return invalidSetting('LLM_MODEL');
     }
+    const fallbackSetting = env['OLLAMA_FALLBACK_ENABLED'] ?? 'false';
+    if (fallbackSetting !== 'true' && fallbackSetting !== 'false') {
+        return invalidSetting('OLLAMA_FALLBACK_ENABLED');
+    }
     return Object.freeze({
+        responseMode,
         llmProvider: provider,
         llmBaseUrl,
         llmModel,
         ollamaBaseUrl,
         ollamaModel,
+        ollamaFallbackEnabled: fallbackSetting === 'true',
         ollamaTimeoutMs: integerSetting(env, 'OLLAMA_TIMEOUT_MS', 120_000, 1_000, 300_000),
         maxRounds: integerSetting(env, 'AGENT_MAX_ROUNDS', 4, 1, 4),
         maxToolCalls: integerSetting(env, 'AGENT_MAX_TOOL_CALLS', 5, 1, 5),

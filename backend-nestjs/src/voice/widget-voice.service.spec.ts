@@ -46,6 +46,26 @@ describe('WidgetVoiceService', () => {
     expect(ports.stt.healthCheck).toHaveBeenCalledTimes(1);
   });
 
+  it('rechecks unhealthy services quickly so recovered voice providers become available', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, ports } = build({ healthy: [false, true, true] });
+      await expect(service.availability('t', 'a')).resolves.toMatchObject({
+        available: false, diagnostics: { unavailable: ['stt'] },
+      });
+
+      ports.stt.healthCheck.mockResolvedValue(true);
+      await jest.advanceTimersByTimeAsync(1_000);
+      await expect(service.availability('t', 'a')).resolves.toMatchObject({
+        available: true, diagnostics: { unavailable: [] },
+      });
+      await service.availability('t', 'a');
+      expect(ports.stt.healthCheck).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('identifies failed dependencies without exposing internal endpoints', async () => {
     const { service } = build({ healthy: [false, true, false] });
     await expect(service.availability('t', 'a')).resolves.toMatchObject({

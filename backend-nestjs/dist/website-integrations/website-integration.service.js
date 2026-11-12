@@ -180,6 +180,24 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
         await this.integrations.record(tenantId, integrationId);
         return this.integrations.listKnowledge(tenantId, integrationId, page, pageSize);
     }
+    async rebuildIndex(integrationId) {
+        const tenantId = this.tenant().tenantId;
+        await this.integrations.record(tenantId, integrationId);
+        const pages = await this.integrations.pagesForReindex(tenantId, integrationId);
+        let indexed = 0;
+        for (const page of pages) {
+            if (!Buffer.isBuffer(page.article_id) && !(page.article_id instanceof Uint8Array)) {
+                throw new common_1.ServiceUnavailableException('A website knowledge record has an invalid article reference.');
+            }
+            const articleId = Buffer.from(page.article_id);
+            const content = [page.title, page.summary, page.content].filter((value) => typeof value === 'string' && value.length > 0).join('\n\n');
+            const language = typeof page.language_code === 'string' ? page.language_code : 'en';
+            await this.knowledge.transaction((manager) => this.knowledge.replaceChunks(manager, { articleId }, (0, text_utils_1.chunkText)(content), language));
+            indexed += 1;
+        }
+        await this.integrations.refreshCounts(tenantId, integrationId);
+        return { id: integrationId, status: 'completed', indexed };
+    }
     async authenticateIngestion(key) {
         if (!key || !/^mzi_[A-Za-z0-9_-]{43}$/.test(key))
             throw new common_1.UnauthorizedException('Integration credentials are invalid.');

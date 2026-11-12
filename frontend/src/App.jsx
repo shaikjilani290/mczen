@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AudioLines,
   Bot,
+  Check,
   Globe,
+  Keyboard,
   Languages,
   LogOut,
   Mic,
   MicOff,
+  PanelLeft,
   Plus,
   Send,
   ShieldCheck,
@@ -15,6 +17,7 @@ import {
   VolumeX,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import { voiceApi } from "./voice/voiceApi.js";
 import { VoiceClient } from "./voice/voiceClient.js";
@@ -27,16 +30,27 @@ const QUICK_PROMPTS = [
 ];
 
 const STATUS_LABELS = {
-  idle: "Ready when you are",
-  connecting: "Connecting securely…",
-  listening: "Listening",
-  transcribing: "Transcribing your speech…",
-  processing: "Thinking",
+  idle: "Tap to speak",
+  connecting: "Connecting…",
+  listening: "I'm listening",
+  transcribing: "Transcribing…",
+  processing: "Thinking…",
   speaking: "Speaking",
   interrupted: "Interrupted",
   reconnecting: "Reconnecting…",
   error: "Voice unavailable",
 };
+
+function formatStamp(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  const label = date.toDateString() === today.toDateString()
+    ? "Today"
+    : date.toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" });
+  return `${label} · ${time}`;
+}
 
 function SignIn({ onSignedIn }) {
   const [email, setEmail] = useState("");
@@ -81,29 +95,18 @@ function SignIn({ onSignedIn }) {
   }
 
   return (
-    <main className="auth-page">
+    <main className="app app-auth">
+      <span className="app-glow" aria-hidden="true" />
       <section className="auth-shell">
-        <aside className="auth-visual">
-          <div className="auth-brand">
-            <span className="brand-mark">M</span>
-            <span><b>McZEN</b><small>VOICE COMPANION</small></span>
-          </div>
-          <div>
-            <h2>Talk to your knowledge, in your language.</h2>
-            <p>Ask by voice or text and hear grounded answers from your own workspace.</p>
-            <ul className="auth-features">
-              <li><Globe size={14} /> English, Hindi and Telugu — spoken replies</li>
-              <li><ShieldCheck size={14} /> Private workspace, isolated per tenant</li>
-              <li><Sparkles size={14} /> Answers grounded in your knowledge base</li>
-            </ul>
-          </div>
-          <span className="auth-visual-foot">McZEN AI · Voice assistant for everyday wellness</span>
-        </aside>
-        <section className="auth-card">
-          <p className="eyebrow">WELCOME BACK</p>
-          <h1>Sign in to McZEN</h1>
-          <p className="auth-copy">Continue to your private voice workspace.</p>
-        {error && <div className="notice error-notice" role="alert">{error}</div>}
+        <div className="auth-brand">
+          <span className="brand-mark">M</span>
+          <span><b>McZEN</b><small>VOICE COMPANION</small></span>
+        </div>
+        <h1>Talk to your knowledge</h1>
+        <p className="auth-copy">Ask by voice or text and hear grounded answers in your own language.</p>
+
+        {error && <div className="banner error" role="alert">{error}</div>}
+
         {!login ? (
           <form onSubmit={submit} className="auth-form">
             <label>
@@ -126,30 +129,29 @@ function SignIn({ onSignedIn }) {
                 required
               />
             </label>
-            <button className="primary-button full-button" disabled={busy}>
-              {busy ? "Signing in…" : "Sign in"}
+            <button className="auth-submit" disabled={busy}>
+              {busy ? "Signing in…" : "Continue"}
             </button>
           </form>
         ) : (
-          <div className="tenant-options">
-            <p>Choose your workspace</p>
+          <div className="tenant-list">
+            <p className="sheet-label">Choose your workspace</p>
             {login.tenants.map((tenant) => (
-              <button
-                key={tenant.id}
-                disabled={busy}
-                onClick={() => activate(login.token, tenant)}
-              >
+              <button key={tenant.id} disabled={busy} onClick={() => activate(login.token, tenant)}>
                 <span>{tenant.name}</span>
                 <small>{tenant.role}</small>
               </button>
             ))}
           </div>
         )}
-          <p className="auth-footnote">
-            <ShieldCheck size={15} />
-            Your microphone is only used after you choose to start a voice session.
-          </p>
-        </section>
+
+        <ul className="auth-features">
+          <li><Globe size={14} /> English, Hindi and Telugu — spoken replies</li>
+          <li><ShieldCheck size={14} /> Private workspace, isolated per tenant</li>
+        </ul>
+        <p className="auth-foot">
+          <Sparkles size={13} /> Microphone access starts only when you begin a session.
+        </p>
       </section>
     </main>
   );
@@ -180,8 +182,10 @@ export default function App() {
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [sheet, setSheet] = useState(null);
   const clientRef = useRef(null);
   const transcriptEnd = useRef(null);
+  const composerRef = useRef(null);
   const interruptedTimerRef = useRef(null);
   const workspaceRef = useRef({ session: null, conversationId: "", language: "auto", detectedLanguage: "" });
   const skipHistoryForRef = useRef("");
@@ -329,6 +333,7 @@ export default function App() {
   const allowedLanguages = voiceSettings?.allowedLanguages;
   const canSpeakLanguage = hasSpeechOutput(language, voiceSettings);
   const voiceActive = ["connecting", "listening", "transcribing", "processing", "speaking", "interrupted", "reconnecting"].includes(clientState);
+  const hasThread = messages.length > 0 || Boolean(partial);
 
   async function createConversation() {
     if (!session || !assistantId) throw new Error("Choose an assistant before starting a conversation.");
@@ -339,7 +344,15 @@ export default function App() {
     skipHistoryForRef.current = createdId;
     setConversationId(createdId);
     setMessages([]);
+    setSheet(null);
     return createdId;
+  }
+
+  // Telugu always speaks with the `my_voice` voice; other languages keep the
+  // assistant default unless the user picked a voice explicitly.
+  function resolveVoiceId() {
+    if (language === "te" && voiceOptions.some((item) => item.id === "my_voice")) return "my_voice";
+    return voiceOptions.some((item) => item.id === selectedVoice) ? selectedVoice : "";
   }
 
   async function startVoice() {
@@ -351,12 +364,12 @@ export default function App() {
     try {
       let activeConversation = conversationId;
       if (!activeConversation) activeConversation = await createConversation();
-      const requestedVoice = voiceOptions.find((item) => item.id === selectedVoice)?.id;
+      const voiceId = resolveVoiceId();
       await clientRef.current.start(session.token, {
         assistantId,
         conversationId: activeConversation,
         language,
-        ...(requestedVoice ? { voiceId: requestedVoice } : {}),
+        ...(voiceId ? { voiceId } : {}),
       });
     } catch (issue) {
       setConnected(false);
@@ -383,6 +396,7 @@ export default function App() {
     setConversationId(id);
     setError("");
     setNotice("");
+    setSheet(null);
   }
 
   async function submitText(event) {
@@ -420,6 +434,7 @@ export default function App() {
     } catch {
       // Local sign-out must still complete if the network is unavailable.
     }
+    setSheet(null);
     setConnected(false);
     setSession(null);
     setAssistants([]);
@@ -442,199 +457,116 @@ export default function App() {
     return <SignIn onSignedIn={(token, tenant) => setSession({ token, tenant })} />;
   }
 
-  return (
-    <main className="app-shell">
-      <header className="app-header">
-        <a className="brand" href="#/" aria-label="McZEN voice assistant home">
-          <span className="brand-mark">M</span>
-          <span><b>McZEN</b><small>VOICE COMPANION</small></span>
-        </a>
-        <div className="header-right">
-          <span className="workspace-name">{session.tenant?.name || "Workspace"}</span>
-          <span className={`connection-pill ${connected ? "is-connected" : ""}`}>
-            {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
-            {connected ? "Connected" : "Offline"}
-          </span>
-          <button className="icon-button" onClick={signOut} title="Sign out" aria-label="Sign out">
-            <LogOut size={17} />
-          </button>
-        </div>
-      </header>
+  const statusLabel = STATUS_LABELS[clientState] || STATUS_LABELS.idle;
+  const stageHint = clientState === "transcribing"
+    ? "Finishing recognition — keep this tab open"
+    : clientState === "error"
+      ? "Retry, or continue by typing"
+      : detectedLanguage
+        ? `Detected ${LANGUAGE_LABELS[detectedLanguage] || detectedLanguage}`
+        : connected
+          ? "Speak naturally — pause when you're done"
+          : "English, Hindi or Telugu";
 
-      <div className="workspace">
-        <aside className="history-panel">
-          <div className="history-heading">
-            <div><p className="eyebrow">YOUR SPACE</p><h2>Conversations</h2></div>
+  return (
+    <main className="app">
+      <span className={`app-glow ${voiceActive ? "is-live" : ""}`} aria-hidden="true" />
+
+      <div className="app-frame">
+        <header className="top-bar">
+          <button className="round-btn" onClick={() => setSheet("history")} aria-label="Conversations" title="Conversations">
+            <PanelLeft size={17} />
+          </button>
+          <span className="brand-pill">
+            <span className={`brand-dot ${connected ? "is-live" : ""}`} />
+            {selectedAssistant?.name || "McZEN"}
+            <em>Beta</em>
+          </span>
+          <button className="round-btn" onClick={() => setSheet("settings")} aria-label="Settings" title="Settings">
+            <span className="dots" aria-hidden="true"><i /><i /><i /></span>
+          </button>
+        </header>
+
+        <section className={`stage state-${clientState} ${hasThread ? "is-compact" : ""}`}>
+          <div className={`orb ${voiceActive ? "is-live" : ""}`}>
+            <span className="orb-aura" aria-hidden="true" />
+            <span className="orb-shell" aria-hidden="true">
+              <span className="orb-ribbon r1" />
+              <span className="orb-ribbon r2" />
+              <span className="orb-ribbon r3" />
+              <span className="orb-gloss" />
+            </span>
+          </div>
+
+          <p className="stage-status" aria-live="polite">{statusLabel}</p>
+          <p className="stage-hint">{stageHint}</p>
+
+          <div className="voice-controls">
             <button
-              className="icon-button new-chat"
-              onClick={async () => {
-                if (!assistantId) return;
-                try {
-                  if (voiceActive) await stopVoice();
-                  await createConversation();
-                } catch (issue) { setError(issue.message); }
+              className="round-btn control"
+              onClick={() => {
+                if (clientState === "speaking") clientRef.current?.interrupt();
+                else if (connected) void stopVoice();
+                else if (partial) setPartial("");
               }}
-              aria-label="New conversation"
-              title="New conversation"
-              disabled={!assistantId}
+              aria-label={clientState === "speaking" ? "Interrupt reply" : "Stop voice"}
+              title={clientState === "speaking" ? "Interrupt reply" : "Stop voice"}
             >
-              <Plus size={18} />
+              {voiceActive ? <VolumeX size={17} /> : <Volume2 size={17} />}
+            </button>
+
+            <button
+              className={`mic-btn ${voiceActive ? "is-active" : ""}`}
+              onClick={() => (voiceActive ? void stopVoice() : void startVoice())}
+              disabled={busy || loadingWorkspace || !assistantId}
+              aria-label={voiceActive ? "Stop voice session" : "Start voice session"}
+              title={voiceActive ? "Stop voice session" : "Start voice session"}
+            >
+              {voiceActive ? <MicOff size={22} /> : <Mic size={22} />}
+            </button>
+
+            <button
+              className="round-btn control"
+              onClick={() => composerRef.current?.focus()}
+              aria-label="Type a message"
+              title="Type a message"
+            >
+              <Keyboard size={17} />
             </button>
           </div>
-          <div className="conversation-list">
-            {conversations.map((item) => (
-              <button
-                key={item.id}
-                className={`conversation-item ${conversationId === item.id ? "selected" : ""}`}
-                onClick={() => void switchConversation(item.id)}
-              >
-                <span className="conversation-dot" />
-                <span className="conversation-copy">
-                  <b>{item.title || "New conversation"}</b>
-                  <small>{item.messageCount || 0} messages</small>
-                </span>
-              </button>
-            ))}
-            {!conversations.length && <p className="empty-history">Your conversations will appear here.</p>}
-          </div>
-          <div className="history-foot">
-            <span className="user-avatar">{session.tenant?.name?.slice(0, 1) || "M"}</span>
-            <span><b>{session.tenant?.name || "Signed in"}</b><small>Private workspace</small></span>
-          </div>
-        </aside>
+        </section>
 
-        <section className="assistant-panel">
-          <div className="assistant-topline">
-            <div>
-              <p className="eyebrow">PERSONAL AI ASSISTANT</p>
-              <h1>How can I help?</h1>
-            </div>
-            <label className="assistant-select">
-              <span>Assistant</span>
-              <select
-                value={assistantId}
-                onChange={(event) => {
-                  setAssistantId(event.target.value);
-                  setConversationId("");
-                  setMessages([]);
-                  setVoiceSettings(null);
-                  setSelectedVoice("");
-                }}
-                disabled={voiceActive}
-              >
-                {assistants.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
-            </label>
-          </div>
-
-          <div className={`voice-stage state-${clientState}`}>
-            <div className={`voice-orb ${voiceActive ? "orb-active" : ""}`}>
-              <span className="orb-halo" />
-              <span className="orb-ring ring-three" />
-              <span className="orb-ring ring-two" />
-              <span className="orb-ring ring-one" />
-              <span className="orb-core"><AudioLines size={34} strokeWidth={1.7} /></span>
-            </div>
-            <div className={`waveform ${voiceActive ? "is-live" : ""}`} aria-hidden="true">
-              {Array.from({ length: 9 }).map((_, index) => <span key={index} />)}
-            </div>
-            <div className="voice-caption" aria-live="polite">
-              <strong>{STATUS_LABELS[clientState] || STATUS_LABELS.idle}</strong>
-              <span>
-                {clientState === "transcribing"
-                  ? "Please wait for recognition to finish. Keep this tab open."
-                  : clientState === "error"
-                  ? "You can retry or continue with text."
-                  : detectedLanguage
-                    ? `Detected ${LANGUAGE_LABELS[detectedLanguage] || detectedLanguage}`
-                    : "Speak naturally in English, Hindi or Telugu"}
-              </span>
-            </div>
-            <div className="voice-actions">
-              {!voiceActive ? (
-                <button className="primary-button mic-button" onClick={startVoice} disabled={busy || loadingWorkspace || !assistantId}>
-                  <Mic size={19} /> {busy ? "Preparing…" : "Start speaking"}
-                </button>
-              ) : (
-                <>
-                  {clientState === "speaking" && (
-                    <button className="secondary-button" onClick={() => clientRef.current?.interrupt()}>
-                      <VolumeX size={17} /> Interrupt
-                    </button>
-                  )}
-                  <button className="secondary-button stop-button" onClick={stopVoice}>
-                    <MicOff size={17} /> Stop session
-                  </button>
-                </>
-              )}
-            </div>
-            <p className="permission-note">Microphone access starts only after you press “Start speaking”.</p>
-          </div>
-
-          <div className="controls-row">
-            <label className="control-field">
-              <Languages size={16} />
-              <span>Language</span>
-              <select value={language} onChange={(event) => changeLanguage(event.target.value)} disabled={voiceActive}>
-                {Object.entries(LANGUAGE_LABELS).map(([code, label]) => {
-                  const unavailable = code !== "auto" && Array.isArray(allowedLanguages) && !allowedLanguages.includes(code);
-                  return <option key={code} value={code} disabled={unavailable}>{label}{unavailable ? " · unavailable" : ""}</option>;
-                })}
-              </select>
-            </label>
-            <label className="control-field">
-              <Volume2 size={16} />
-              <span>Voice</span>
-              <select
-                value={selectedVoice}
-                onChange={(event) => setSelectedVoice(event.target.value)}
-                disabled={voiceActive || voiceOptions.length === 0}
-              >
-                {voiceOptions.length
-                  ? <option value="">Assistant default</option>
-                  : <option value="">Text only</option>}
-                {voiceOptions.map((option) => (
-                  <option value={option.id} key={option.id}>{option.label} · {option.gender}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {language === "te" && !canSpeakLanguage && (
-            <div className="capability-note" role="status">
-              Telugu recognition is available. Telugu speech output is not configured; replies will be shown as text.
-            </div>
-          )}
-          {language === "auto" && voiceSettings && !canSpeakLanguage && (
-            <div className="capability-note" role="status">
-              Speech output is not available for the assistant’s configured default language. Text replies remain available.
-            </div>
-          )}
-
-          {!messages.length && !partial && (
-            <div className="quick-prompts">
+        <section className="thread" aria-live="polite">
+          {!hasThread && !busy && (
+            <div className="quick-row">
               {QUICK_PROMPTS.map((prompt) => (
-                <button key={prompt} type="button" onClick={() => setInput(prompt)}>
+                <button key={prompt} type="button" onClick={() => { setInput(prompt); composerRef.current?.focus(); }}>
                   {prompt}
                 </button>
               ))}
             </div>
           )}
 
-          <div className="transcript-panel" aria-live="polite">
-            {!messages.length && !partial && !busy && (
-              <div className="welcome-card">
-                <span className="welcome-icon"><Bot size={19} /></span>
-                <div><b>Your conversation starts here</b><p>Ask a question by voice or type below. Your history stays in this workspace.</p></div>
-              </div>
-            )}
-            {messages.map((message, index) => (
-              <article className={`message-card ${message.role}`} key={`${message.createdAt || "message"}-${index}`}>
-                {message.role === "assistant" && <span className="message-avatar"><Bot size={15} /></span>}
-                <div className="message-body">
-                  <div className="message-meta">
-                    <b>{message.role === "user" ? "YOU" : "MCZEN"}</b>
-                    {message.language && <span>{LANGUAGE_LABELS[message.language] || message.language}</span>}
-                  </div>
+          {language === "te" && !canSpeakLanguage && (
+            <div className="banner info" role="status">
+              తెలుగు గుర్తింపు అందుబాటులో ఉంది. తెలుగు వాక్యీకరణ ఇప్పటికీ సందేశ అవుట్‌పుట్‌గా అందించబడదు; జవాబులు బదులుగా వచనంగా చూపబడతాయి.
+            </div>
+          )}
+          {language === "auto" && voiceSettings && !canSpeakLanguage && (
+            <div className="banner info" role="status">
+              మీ అసిస్టెంట్ కోసం సెట్ చేసిన డిఫాల్ట్ భాషకు వాక్యీకరణ అందుబాటులో లేదు. వాక్యీకరణ లేని భాషలకు జవాబులు బదులుగా వచనంగా అందుతాయి.
+            </div>
+          )}
+
+          {messages.map((message, index) => (
+            <article className={`bubble ${message.role}`} key={`${message.createdAt || "message"}-${index}`}>
+              {message.role === "assistant" ? (
+                <>
+                  <header className="bubble-head">
+                    <span className="bubble-avatar"><Bot size={14} /></span>
+                    <b>{selectedAssistant?.name || "McZEN"}</b>
+                    <span className="bubble-time">{formatStamp(message.createdAt)}</span>
+                  </header>
                   <p>{message.content}</p>
                   {message.sources?.length > 0 && (
                     <div className="source-list">
@@ -645,41 +577,173 @@ export default function App() {
                       ))}
                     </div>
                   )}
-                </div>
-              </article>
-            ))}
-            {partial && (
-              <div className="partial-transcript"><span className="live-dot" />{partial}</div>
-            )}
-            {busy && <div className="thinking-indicator"><span /><span /><span /> McZEN is thinking</div>}
-            <div ref={transcriptEnd} />
-          </div>
+                  <footer className="bubble-foot">
+                    {message.language && <span className="chip">{LANGUAGE_LABELS[message.language] || message.language}</span>}
+                    <span className="bubble-foot-note">Grounded answer</span>
+                    <span className="bubble-action" aria-hidden="true"><Sparkles size={13} /></span>
+                  </footer>
+                </>
+              ) : (
+                <>
+                  <p>{message.content}</p>
+                  {message.language && <span className="bubble-time">{formatStamp(message.createdAt)}</span>}
+                </>
+              )}
+            </article>
+          ))}
 
-          {(error || notice) && (
-            <div className={`notice ${error ? "error-notice" : "info-notice"}`} role={error ? "alert" : "status"}>
-              {error || notice}
-              {error && <button onClick={() => setError("")} aria-label="Dismiss error">×</button>}
+          {partial && (
+            <div className="bubble user is-partial">
+              <p><span className="live-dot" />{partial}</p>
             </div>
           )}
+          {busy && (
+            <div className="thinking"><span /><span /><span /></div>
+          )}
+          <div ref={transcriptEnd} />
+        </section>
 
+        {(error || notice) && (
+          <div className={`banner ${error ? "error" : "info"} inline`} role={error ? "alert" : "status"}>
+            <span>{error || notice}</span>
+            <button onClick={() => (error ? setError("") : setNotice(""))} aria-label="Dismiss">×</button>
+          </div>
+        )}
+
+        <div className="dock">
           <form className="composer" onSubmit={submitText}>
             <input
+              ref={composerRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder="Type a message instead…"
+              placeholder="Ask anything"
               aria-label="Message"
               maxLength={2000}
             />
-            <button className="send-button" disabled={!input.trim() || busy || !selectedAssistant} aria-label="Send message">
+            <button className="send-btn" disabled={!input.trim() || busy || !selectedAssistant} aria-label="Send message">
               <Send size={17} />
             </button>
           </form>
-          <footer className="assistant-footer">
-            {connected ? <><Wifi size={13} /> Secure voice session active</> : <><WifiOff size={13} /> Voice is off until you start a session</>}
-            {voiceSettings?.ttsEngineId && <span> · {voiceSettings.ttsEngineId}</span>}
-          </footer>
-        </section>
+          <p className="dock-foot">
+            {connected ? <><Wifi size={12} /> Secure session</> : <><WifiOff size={12} /> Voice is off</>}
+            {voiceSettings?.ttsEngineId && <span>· {voiceSettings.ttsEngineId}</span>}
+          </p>
+        </div>
       </div>
+
+      {sheet && (
+        <div className="sheet-layer" role="dialog" aria-modal="true" aria-label={sheet === "history" ? "Conversations" : "Settings"}>
+          <button className="sheet-backdrop" onClick={() => setSheet(null)} aria-label="Close" />
+          <div className={`sheet sheet-${sheet}`}>
+            {sheet === "history" ? (
+              <>
+                <header className="sheet-head">
+                  <div><p className="sheet-label">Your space</p><h2>Conversations</h2></div>
+                  <button
+                    className="round-btn accent"
+                    onClick={async () => {
+                      if (!assistantId) return;
+                      try {
+                        if (voiceActive) await stopVoice();
+                        await createConversation();
+                      } catch (issue) { setError(issue.message); }
+                    }}
+                    aria-label="New conversation"
+                    title="New conversation"
+                    disabled={!assistantId}
+                  >
+                    <Plus size={17} />
+                  </button>
+                </header>
+                <div className="conv-list">
+                  {conversations.map((item) => (
+                    <button
+                      key={item.id}
+                      className={`conv-item ${conversationId === item.id ? "selected" : ""}`}
+                      onClick={() => void switchConversation(item.id)}
+                    >
+                      <span className="conv-dot" />
+                      <span className="conv-copy">
+                        <b>{item.title || "New conversation"}</b>
+                        <small>{item.messageCount || 0} messages</small>
+                      </span>
+                    </button>
+                  ))}
+                  {!conversations.length && <p className="conv-empty">Your conversations will appear here.</p>}
+                </div>
+                <footer className="sheet-foot">
+                  <span className="avatar">{session.tenant?.name?.slice(0, 1) || "M"}</span>
+                  <span><b>{session.tenant?.name || "Signed in"}</b><small>Private workspace</small></span>
+                </footer>
+              </>
+            ) : (
+              <>
+                <header className="sheet-head">
+                  <div><p className="sheet-label">Session</p><h2>Settings</h2></div>
+                  <button className="round-btn" onClick={() => setSheet(null)} aria-label="Close settings">
+                    <X size={17} />
+                  </button>
+                </header>
+
+                <div className="sheet-body">
+                  <label className="field">
+                    <span><Languages size={15} /> Language</span>
+                    <select value={language} onChange={(event) => changeLanguage(event.target.value)} disabled={voiceActive}>
+                      {Object.entries(LANGUAGE_LABELS).map(([code, label]) => {
+                        const unavailable = code !== "auto" && Array.isArray(allowedLanguages) && !allowedLanguages.includes(code);
+                        return <option key={code} value={code} disabled={unavailable}>{label}{unavailable ? " · unavailable" : ""}</option>;
+                      })}
+                    </select>
+                  </label>
+
+                  <label className="field">
+                    <span><Volume2 size={15} /> Voice</span>
+                    <select
+                      value={selectedVoice}
+                      onChange={(event) => setSelectedVoice(event.target.value)}
+                      disabled={voiceActive || voiceOptions.length === 0}
+                    >
+                      {voiceOptions.length
+                        ? <option value="">Assistant default</option>
+                        : <option value="">Text only</option>}
+                      {voiceOptions.map((option) => (
+                        <option value={option.id} key={option.id}>{option.label} · {option.gender}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="field">
+                    <span><Bot size={15} /> Assistant</span>
+                    <select
+                      value={assistantId}
+                      onChange={(event) => {
+                        setAssistantId(event.target.value);
+                        setConversationId("");
+                        setMessages([]);
+                        setVoiceSettings(null);
+                        setSelectedVoice("");
+                        setSheet(null);
+                      }}
+                      disabled={voiceActive}
+                    >
+                      {assistants.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                    </select>
+                  </label>
+
+                  <div className="field static">
+                    <span><Wifi size={15} /> Session</span>
+                    <p>{connected ? <><Check size={13} /> Connected</> : "Not connected"}</p>
+                  </div>
+
+                  <button className="sign-out" onClick={signOut}>
+                    <LogOut size={15} /> Sign out
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

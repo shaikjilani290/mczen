@@ -336,7 +336,9 @@ describe('configured local/remote STT', () => {
   });
 
   it('checks authenticated health, reports sanitized status and uses enabled health fallback', async () => {
-    const fetch = jest.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('{}'))
+    const fetch = jest.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      status: 'online', service: 'McZEN GPU STT', model: 'large-v3', device: 'cuda',
+    })))
       .mockResolvedValueOnce(new Response('', { status: 503 }));
     const adapter = new ConfiguredSttAdapter(local);
     expect(await adapter.healthCheck()).toBe(true);

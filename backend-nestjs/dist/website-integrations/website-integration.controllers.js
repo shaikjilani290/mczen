@@ -67,6 +67,9 @@ let WebsiteIntegrationAdminController = class WebsiteIntegrationAdminController 
     sync(id) {
         return this.service.beginSync(integrationId(id));
     }
+    rebuildIndex(id) {
+        return this.service.rebuildIndex(integrationId(id));
+    }
     rotateKeys(id) {
         return this.service.rotateKeys(integrationId(id));
     }
@@ -138,6 +141,16 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", void 0)
 ], WebsiteIntegrationAdminController.prototype, "sync", null);
+__decorate([
+    (0, common_1.Post)(':id/rebuild-index'),
+    (0, common_1.HttpCode)(200),
+    (0, audit_interceptor_1.Audited)({ action: 'website_integration.rebuild_index', resourceType: 'website_integration', idParam: 'id' }),
+    (0, auth_decorators_1.RequirePermission)('tenants:write'),
+    __param(0, (0, common_1.Param)('id')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", void 0)
+], WebsiteIntegrationAdminController.prototype, "rebuildIndex", null);
 __decorate([
     (0, common_1.Post)(':id/keys/rotate'),
     (0, common_1.HttpCode)(200),

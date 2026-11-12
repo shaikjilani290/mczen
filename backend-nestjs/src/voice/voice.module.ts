@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+﻿import { Module } from '@nestjs/common';
 import { AgentModule } from '../agent/agent.module';
 import { AuthModule } from '../auth/auth.module';
 import { ConversationsModule } from '../conversations/conversations.module';
@@ -10,6 +10,8 @@ import { SPEECH_TO_TEXT } from './stt/stt.port';
 import { SileroVadAdapter } from './vad/silero-vad.adapter';
 import { VOICE_ACTIVITY } from './vad/vad.port';
 import { PiperAdapter } from './tts/piper.adapter';
+import { DhvaaniAdapter } from './tts/dhvaani.adapter';
+import { CompositeTtsAdapter } from './tts/composite-tts.adapter';
 import { TEXT_TO_SPEECH } from './tts/tts.port';
 import { VoiceAuthService } from './voice-auth.service';
 import { VoiceGateway } from './voice.gateway';
@@ -39,10 +41,12 @@ import { WebsiteDataModule } from '../website-integrations/website-data.module';
     ConfiguredSttAdapter,
     SileroVadAdapter,
     PiperAdapter,
+    DhvaaniAdapter,
+    CompositeTtsAdapter,
     AgentInvocationAdapter,
     { provide: SPEECH_TO_TEXT, useExisting: ConfiguredSttAdapter },
     { provide: VOICE_ACTIVITY, useExisting: SileroVadAdapter },
-    { provide: TEXT_TO_SPEECH, useExisting: PiperAdapter },
+    { provide: TEXT_TO_SPEECH, useExisting: CompositeTtsAdapter },
     { provide: AGENT_INVOCATION, useExisting: AgentInvocationAdapter },
   ],
 })

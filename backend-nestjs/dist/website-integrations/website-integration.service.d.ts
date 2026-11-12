@@ -52,6 +52,11 @@ export declare class WebsiteIntegrationService {
     knowledgeList(integrationId: string, page: number, pageSize: number): Promise<{
         [x: string]: unknown;
     }[]>;
+    rebuildIndex(integrationId: string): Promise<{
+        id: string;
+        status: "completed";
+        indexed: number;
+    }>;
     private authenticateIngestion;
     ingestPages(key: string | undefined, body: unknown): Promise<{
         accepted: number;

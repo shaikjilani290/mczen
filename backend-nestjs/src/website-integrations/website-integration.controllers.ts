@@ -92,6 +92,14 @@ export class WebsiteIntegrationAdminController {
     return this.service.beginSync(integrationId(id));
   }
 
+  @Post(':id/rebuild-index')
+  @HttpCode(200)
+  @Audited({ action: 'website_integration.rebuild_index', resourceType: 'website_integration', idParam: 'id' })
+  @RequirePermission('tenants:write')
+  rebuildIndex(@Param('id') id: string) {
+    return this.service.rebuildIndex(integrationId(id));
+  }
+
   @Post(':id/keys/rotate')
   @HttpCode(200)
   @Audited({ action: 'website_integration.keys.rotate', resourceType: 'website_integration', idParam: 'id' })

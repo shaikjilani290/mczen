@@ -22,6 +22,20 @@ describe('WebsiteIntegrationRepository', () => {
     const [sql] = query.mock.calls[0];
     expect(sql).toContain("GROUP_CONCAT(REPLACE(SUBSTRING(k.`content`,1,1600),CHAR(10),' ')");
   });
+  it('scopes website page retrieval to a verified integration when one is present', async () => {
+    const query = jest.fn().mockResolvedValue([]);
+    const repository = new WebsiteIntegrationRepository({ query } as unknown as DataSource);
+    const tenantId = newUuidv7();
+    const assistantId = newUuidv7();
+    const integrationId = newUuidv7();
+    await repository.searchPages(tenantId, assistantId, 'return policy', 'policy', 5, integrationId);
+    const [sql, parameters] = query.mock.calls[0];
+    expect(sql).toContain('i.`id`=?');
+    expect(parameters).toEqual([
+      'return policy', uuidToBinary(tenantId), uuidToBinary(assistantId), uuidToBinary(integrationId),
+      'return policy', 'policy', 'return policy', 5,
+    ]);
+  });
   it('ranks explicitly named products and full-text relevance before recency without interpolating user text', async () => {
     const query = jest.fn().mockResolvedValue([]);
     const repository = new WebsiteIntegrationRepository({ query } as unknown as DataSource);

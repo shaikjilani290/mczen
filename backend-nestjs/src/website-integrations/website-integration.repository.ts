@@ -340,10 +340,19 @@ export class WebsiteIntegrationRepository {
     return { pageViews: Number(rows[0]?.pageViews ?? 0) };
   }
 
-  async searchPages(tenantId: string, assistantId: string, query: string, type: string | null, limit: number): Promise<Row[]> {
+  async searchPages(
+    tenantId: string,
+    assistantId: string,
+    query: string,
+    type: string | null,
+    limit: number,
+    integrationId?: string,
+  ): Promise<Row[]> {
     const typeClause = type ? ' AND p.`page_type`=?' : '';
+    const integrationClause = integrationId ? ' AND i.`id`=?' : '';
     const params: unknown[] = [
-      uuidToBinary(tenantId), uuidToBinary(assistantId), query,
+      query, uuidToBinary(tenantId), uuidToBinary(assistantId),
+      ...(integrationId ? [uuidToBinary(integrationId)] : []), query,
       ...(type ? [type] : []), query, limit,
     ];
     return this.run(
@@ -354,10 +363,10 @@ export class WebsiteIntegrationRepository {
        JOIN \`website_integrations\` i ON i.\`id\`=p.\`integration_id\` AND i.\`tenant_id\`=p.\`tenant_id\`
        JOIN \`knowledge_chunks\` k ON k.\`article_id\`=p.\`article_id\` AND k.\`tenant_id\`=p.\`tenant_id\`
        WHERE p.\`tenant_id\`=? AND i.\`assistant_id\`=? AND i.\`status\`='active' AND p.\`status\`='active'
-         AND MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)${typeClause}
+         ${integrationClause} AND MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)${typeClause}
        GROUP BY p.\`id\`,p.\`canonical_url\`,p.\`title\`,p.\`meta_description\`,p.\`page_type\`
        ORDER BY MAX(MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)) DESC LIMIT ?`,
-      [query, ...params],
+      params,
     );
   }
 
@@ -429,5 +438,16 @@ export class WebsiteIntegrationRepository {
 
   async listKnowledge(tenantId: string, integrationId: string, page = 1, pageSize = 25): Promise<Row[]> {
     return this.pages(tenantId, integrationId, page, pageSize);
+  }
+
+  async pagesForReindex(tenantId: string, integrationId: string): Promise<Row[]> {
+    return this.run(
+      `SELECT p.\`article_id\`,a.\`title\`,a.\`summary\`,a.\`content\`,a.\`language_code\`
+       FROM \`website_pages\` p
+       JOIN \`knowledge_articles\` a ON a.\`id\`=p.\`article_id\` AND a.\`tenant_id\`=p.\`tenant_id\`
+       WHERE p.\`tenant_id\`=? AND p.\`integration_id\`=? AND p.\`status\`='active' AND a.\`status\`='published'
+       ORDER BY p.\`id\``,
+      [uuidToBinary(tenantId), uuidToBinary(integrationId)],
+    );
   }
 }

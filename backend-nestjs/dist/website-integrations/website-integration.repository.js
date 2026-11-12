@@ -243,10 +243,12 @@ let WebsiteIntegrationRepository = class WebsiteIntegrationRepository {
         const rows = await this.run(`SELECT COUNT(*) AS pageViews FROM \`website_page_views\` WHERE \`tenant_id\`=? AND \`integration_id\`=?`, [(0, uuid_1.uuidToBinary)(tenantId), (0, uuid_1.uuidToBinary)(integrationId)]);
         return { pageViews: Number(rows[0]?.pageViews ?? 0) };
     }
-    async searchPages(tenantId, assistantId, query, type, limit) {
+    async searchPages(tenantId, assistantId, query, type, limit, integrationId) {
         const typeClause = type ? ' AND p.`page_type`=?' : '';
+        const integrationClause = integrationId ? ' AND i.`id`=?' : '';
         const params = [
-            (0, uuid_1.uuidToBinary)(tenantId), (0, uuid_1.uuidToBinary)(assistantId), query,
+            query, (0, uuid_1.uuidToBinary)(tenantId), (0, uuid_1.uuidToBinary)(assistantId),
+            ...(integrationId ? [(0, uuid_1.uuidToBinary)(integrationId)] : []), query,
             ...(type ? [type] : []), query, limit,
         ];
         return this.run(`SELECT p.\`canonical_url\` AS url,p.\`title\`,p.\`meta_description\` AS metaDescription,p.\`page_type\` AS pageType,
@@ -256,9 +258,9 @@ let WebsiteIntegrationRepository = class WebsiteIntegrationRepository {
        JOIN \`website_integrations\` i ON i.\`id\`=p.\`integration_id\` AND i.\`tenant_id\`=p.\`tenant_id\`
        JOIN \`knowledge_chunks\` k ON k.\`article_id\`=p.\`article_id\` AND k.\`tenant_id\`=p.\`tenant_id\`
        WHERE p.\`tenant_id\`=? AND i.\`assistant_id\`=? AND i.\`status\`='active' AND p.\`status\`='active'
-         AND MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)${typeClause}
+         ${integrationClause} AND MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)${typeClause}
        GROUP BY p.\`id\`,p.\`canonical_url\`,p.\`title\`,p.\`meta_description\`,p.\`page_type\`
-       ORDER BY MAX(MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)) DESC LIMIT ?`, [query, ...params]);
+       ORDER BY MAX(MATCH(k.\`content\`) AGAINST (? IN NATURAL LANGUAGE MODE)) DESC LIMIT ?`, params);
     }
     async searchProducts(tenantId, assistantId, input) {
         const where = [
@@ -325,6 +327,13 @@ let WebsiteIntegrationRepository = class WebsiteIntegrationRepository {
     }
     async listKnowledge(tenantId, integrationId, page = 1, pageSize = 25) {
         return this.pages(tenantId, integrationId, page, pageSize);
+    }
+    async pagesForReindex(tenantId, integrationId) {
+        return this.run(`SELECT p.\`article_id\`,a.\`title\`,a.\`summary\`,a.\`content\`,a.\`language_code\`
+       FROM \`website_pages\` p
+       JOIN \`knowledge_articles\` a ON a.\`id\`=p.\`article_id\` AND a.\`tenant_id\`=p.\`tenant_id\`
+       WHERE p.\`tenant_id\`=? AND p.\`integration_id\`=? AND p.\`status\`='active' AND a.\`status\`='published'
+       ORDER BY p.\`id\``, [(0, uuid_1.uuidToBinary)(tenantId), (0, uuid_1.uuidToBinary)(integrationId)]);
     }
 };
 exports.WebsiteIntegrationRepository = WebsiteIntegrationRepository;

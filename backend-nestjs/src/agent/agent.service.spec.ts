@@ -13,6 +13,12 @@ import { ToolPermissionService } from './tools/tool-permission.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { ToolValidationService } from './tools/tool-validation.service';
 import type { ConversationsService } from '../conversations/conversations.service';
+import { newUuidv7 } from '../common/ids/uuid';
+import { WebsiteKnowledgeEngine } from '../website-integrations/website-knowledge.engine';
+import { WebsiteIntegrationRepository } from '../website-integrations/website-integration.repository';
+import { MerchantCartService } from '../website-integrations/merchant-cart.service';
+import { ProductIdentityService } from '../website-integrations/product-identity.service';
+import { MemorySharedState } from '../shared-state/memory-shared-state';
 
 function contextFor(
   tenantId = 'tenant-a',
@@ -86,7 +92,7 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     audit = new ToolAuditService();
     const permissions = new ToolPermissionService();
     executor = new ToolExecutorService(registry, permissions, new ToolValidationService(), audit);
-    const config = { values: readAgentRuntimeConfig({}) } as AgentRuntimeConfigService;
+    const config = { values: readAgentRuntimeConfig({ OLLAMA_FALLBACK_ENABLED: 'true' }) } as AgentRuntimeConfigService;
     service = new AgentService(registry, executor, config, permissions);
     executeSpy = jest.spyOn(executor, 'execute');
     fetchMock = jest.spyOn(globalThis, 'fetch').mockRejectedValue(
@@ -116,10 +122,94 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     const result = await service.ask('Show me your best products', {
       ...contextFor(), channel: 'widget',
     });
+
     expect(result.success).toBe(true);
     expect(result.toolCalls).toEqual([{ name: 'search_products', resultCount: 0 }]);
     expect(executeSpy.mock.calls.some(([name]) => name === 'knowledge_search')).toBe(false);
     expect(sentRequest(0).messages[0].content).toContain('cannot add products to a cart');
+  });
+
+  it('answers routine connected-website questions without invoking the configured LLM', async () => {
+    const repository = {
+      searchPages: jest.fn().mockResolvedValue([{
+        url: 'https://merchant.example/returns',
+        title: 'Returns and refunds',
+        excerpt: 'Returns are accepted within 30 days of delivery.',
+      }]),
+      searchProducts: jest.fn().mockResolvedValue([]),
+    } as unknown as WebsiteIntegrationRepository;
+    const engine = new WebsiteKnowledgeEngine(repository);
+    service = new AgentService(
+      registry,
+      executor,
+      { values: readAgentRuntimeConfig({ OLLAMA_FALLBACK_ENABLED: 'true' }) } as AgentRuntimeConfigService,
+      new ToolPermissionService(),
+      undefined,
+      undefined,
+      undefined,
+      engine,
+    );
+
+    const result = await service.ask('Can I get my money back?', {
+      ...contextFor(),
+      assistantId: newUuidv7(),
+      channel: 'widget',
+    });
+
+    expect(result.model).toBe('website-knowledge-engine');
+    expect(result.answer).toContain('Returns are accepted within 30 days');
+    expect(result.sources[0]?.source).toBe('https://merchant.example/returns');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('answers ordering FAQs from website knowledge without invoking the configured LLM', async () => {
+    const repository = {
+      searchPages: jest.fn().mockResolvedValue([{
+        url: 'http://127.0.0.1:5173/faq',
+        title: 'Preview frequently asked questions',
+        excerpt: 'Not yet. You can explore this preview, but placing an order is not supported.',
+      }]),
+      searchProducts: jest.fn().mockResolvedValue([]),
+    } as unknown as WebsiteIntegrationRepository;
+    const engine = new WebsiteKnowledgeEngine(repository);
+    service = new AgentService(
+      registry,
+      executor,
+      { values: readAgentRuntimeConfig({ OLLAMA_FALLBACK_ENABLED: 'true' }) } as AgentRuntimeConfigService,
+      new ToolPermissionService(),
+      undefined,
+      undefined,
+      undefined,
+      engine,
+    );
+
+    const result = await service.ask('Can I place an order in this preview?', {
+      ...contextFor(),
+      assistantId: newUuidv7(),
+      channel: 'widget',
+    });
+
+    expect(result.model).toBe('website-knowledge-engine');
+    expect(result.answer).toContain('placing an order is not supported');
+    expect(result.sources[0]?.title).toBe('Preview frequently asked questions');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns an honest no-LLM fallback when no connected knowledge can answer', async () => {
+    service = new AgentService(
+      registry,
+      executor,
+      { values: readAgentRuntimeConfig({}) } as AgentRuntimeConfigService,
+      new ToolPermissionService(),
+    );
+    const result = await service.ask('What is happening on Mars today?', {
+      ...contextFor(),
+      channel: 'widget',
+    });
+
+    expect(result.model).toBe('no-llm-fallback');
+    expect(result.answer).toContain('could not verify');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('grounds merchant budget answers in an audited currency-qualified search before the model runs', async () => {
@@ -205,9 +295,163 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     });
   }
 
+  it.each([
+    ['ollama', 'text', 'Explain ZENAGE'], ['ollama', 'voice', 'Explain ZENAGE'],
+    ['openai-compatible', 'text', 'Explain ZENAGE'], ['openai-compatible', 'voice', 'Explain ZENAGE'],
+    ['ollama', 'voice', 'EXPLAINS ZENAGE'], ['openai-compatible', 'voice', 'EXPLAINS ZENAGE'],
+    ['openai-compatible', 'text', 'What are the benefits of ZENAGE?'],
+    ['openai-compatible', 'voice', 'What are the benefits of ZENAGE?'],
+  ] as const)('generates a customer-facing product explanation with %s for %s: %s', async (provider, modality, question) => {
+    const product = {
+      externalProductId: 'zenage', name: 'ZENAGE', price: null, salePrice: null,
+      currency: 'INR', images: [], productUrl: 'https://merchant.example/zenage',
+      description: 'Recorded product detail. Description: A nutraceutical formulation supporting skin health.',
+      attributes: { source: 'public/data/storefront.json', coverage: 'full', historical: true },
+    };
+    const repository = Object.assign(Object.create(WebsiteIntegrationRepository.prototype) as WebsiteIntegrationRepository, {
+      productVocabulary: jest.fn().mockResolvedValue([{ externalProductId: 'zenage', name: 'ZENAGE' }]),
+    });
+    const merchant = new MerchantCartService(new MemorySharedState(), repository);
+    const engine = new WebsiteKnowledgeEngine(repository, merchant);
+    const retrieval = jest.spyOn(engine, 'answer');
+    registry.unregister('get_product_details');
+    registry.register(testTool({
+      name: 'get_product_details', requiredPermissions: ['products:read'],
+      inputSchema: {
+        type: 'object', required: ['externalProductId'],
+        properties: { externalProductId: { type: 'string' } }, additionalProperties: false,
+      },
+      handler: async () => ({ product }),
+    }));
+    service = new AgentService(
+      registry, executor,
+      { values: readAgentRuntimeConfig({ LLM_PROVIDER: provider, OLLAMA_FALLBACK_ENABLED: 'true' }) } as AgentRuntimeConfigService,
+      new ToolPermissionService(), undefined, merchant, new ProductIdentityService(repository), engine,
+    );
+    const polished = 'ZENAGE is a nutritional formulation designed to support skin health.';
+    if (provider === 'ollama') queueAssistant(polished);
+    else queueCompatibleAssistant(polished);
+
+    const context: AgentExecutionContext = {
+      ...contextFor(), assistantId: newUuidv7(), channel: 'widget', modality,
+      merchant: { integrationId: newUuidv7(), sessionId: 'product-regression-test', origin: 'https://merchant.example' },
+    };
+    const onText = jest.fn();
+    const result = await service.ask(question, context, { onText });
+
+    expect(result).toMatchObject({
+      success: true,
+      answer: `${polished}\n\nThese are formulation objectives, not independently verified clinical outcomes.`,
+    });
+    expect(result.answer).not.toMatch(/storefront\.json|coverage|historical|Recorded product detail/);
+    expect(retrieval).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sentRequest(0).stream).toBe(false);
+    expect(onText).not.toHaveBeenCalled();
+    expect(sentRequest(0).messages[0].content).toContain('Never copy retrieval wrappers');
+    expect(sentRequest(0).messages.some(message =>
+      message.role === 'tool' && message.content.includes(product.description))).toBe(true);
+    expect(result.products?.[0].externalProductId).toBe('zenage');
+    expect(product.attributes.historical).toBe(true);
+
+    if (provider === 'ollama') queueAssistant('ZENAGE. source: public/data/storefront.json. coverage: full. historical: true.');
+    else queueCompatibleAssistant('ZENAGE. source: public/data/storefront.json. coverage: full. historical: true.');
+    const rejected = await service.ask(question, context, { onText });
+    expect(rejected.success).toBe(false);
+    expect(rejected.answer).not.toMatch(/storefront\.json|coverage:|historical:/);
+    expect(onText).not.toHaveBeenCalled();
+  });
+
   function sentRequest(index: number): SentRequest {
     return JSON.parse(String(fetchMock.mock.calls[index][1]?.body)) as SentRequest;
   }
+
+  it.each(['ollama', 'openai-compatible'] as const)(
+    'restores the seven-question conversational flow and selected-product follow-ups with %s',
+    async provider => {
+      const assistantId = newUuidv7();
+      const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+      const conversations = {
+        prepareAgentTurn: jest.fn(async () => ({ assistantId, history: [...history] })),
+        persistTurn: jest.fn(async (_context: AgentExecutionContext, question: string, result: AgentResponse) => {
+          history.push({ role: 'user', content: question }, { role: 'assistant', content: result.answer });
+        }),
+      };
+      const product = {
+        externalProductId: 'zenage', name: 'ZENAGE', price: null, salePrice: null,
+        currency: 'INR', images: [], productUrl: 'https://merchant.example/zenage',
+        description: 'Beauty-from-within nutraceutical. Ingredients: amino acids, peptides, antioxidants, vitamins, minerals and botanical extracts. Formulation objectives: skin hydration, collagen synthesis and normal skin structure.',
+        attributes: { source: 'public/data/storefront.json', historical: true, coverage: 'full' },
+      };
+      const repository = Object.assign(Object.create(WebsiteIntegrationRepository.prototype) as WebsiteIntegrationRepository, {
+        productVocabulary: jest.fn().mockResolvedValue([{ externalProductId: 'zenage', name: 'ZENAGE' }]),
+      });
+      const merchant = new MerchantCartService(new MemorySharedState(), repository);
+      const engine = new WebsiteKnowledgeEngine(repository, merchant);
+      const retrieval = jest.spyOn(engine, 'answer');
+      registry.unregister('get_product_details');
+      registry.register(testTool({
+        name: 'get_product_details', requiredPermissions: ['products:read'],
+        inputSchema: { type: 'object', required: ['externalProductId'],
+          properties: { externalProductId: { type: 'string' } }, additionalProperties: false },
+        handler: async () => ({ product }),
+      }));
+      registry.register(testTool({
+        name: 'search_products', requiredPermissions: ['products:read'],
+        handler: async () => ({ products: [product] }),
+      }));
+      service = new AgentService(registry, executor,
+        { values: readAgentRuntimeConfig({ LLM_PROVIDER: provider, AGENT_RESPONSE_MODE: 'conversational' }) } as AgentRuntimeConfigService,
+        new ToolPermissionService(), conversations as unknown as ConversationsService,
+        merchant, new ProductIdentityService(repository), engine);
+      const context: AgentExecutionContext = {
+        ...contextFor(), assistantId, conversationId: newUuidv7(), channel: 'widget',
+        merchant: { integrationId: newUuidv7(), sessionId: 'conversational-flow-test', origin: 'https://merchant.example' },
+      };
+      const turns = [
+        ['Hello McZEN.', 'Hello! How can I help you today?'],
+        ['Tell me about McZEN products.', 'The connected catalogue includes ZENAGE, a beauty-from-within nutraceutical.'],
+        ['Explain ZENAGE.', 'ZENAGE is a beauty-from-within nutraceutical.\n\nIts formulation includes amino acids and peptides.\n\n- Supports skin hydration.\n- Supports normal skin structure.'],
+        ['What are its ingredients?', 'ZENAGE contains amino acids, peptides, antioxidants, vitamins, minerals and botanical extracts.'],
+        ['How does it support skin health?', 'ZENAGE has documented formulation objectives for skin hydration and collagen synthesis.'],
+        ['Which product is suitable for my goals?', 'What health goals would you like to focus on?'],
+        ['Give me some daily health tips.', 'For general wellness, stay hydrated, eat a balanced diet and keep a regular sleep routine.'],
+      ];
+      for (const [index, [question, answer]] of turns.entries()) {
+        if (provider === 'ollama') queueAssistant(answer);
+        else queueCompatibleAssistant(answer);
+        const result = await service.ask(question, context);
+        expect(result).toMatchObject({ success: true, model: provider === 'ollama' ? 'qwen2.5:3b' : 'Qwen2.5-3B-Instruct' });
+        expect(result.answer).toContain(answer);
+        expect(result.answer).not.toMatch(/storefront\.json|coverage:|historical:/);
+        expect(fetchMock).toHaveBeenCalledTimes(index + 1);
+        expect(sentRequest(index).stream).toBe(false);
+        const finalInstruction = sentRequest(index).messages.at(-1)?.content ?? '';
+        expect(finalInstruction).toContain(JSON.stringify(question));
+        if (index === 3) expect(finalInstruction).toContain('List the ingredients supplied');
+        if (index === 4) expect(finalInstruction).toContain('documented formulation objectives and nutritional roles');
+        if ([3, 4].includes(index)) {
+          expect(result.products?.[0].name).toBe('ZENAGE');
+          expect(sentRequest(index).messages.some(message =>
+            message.role === 'user' && message.content === 'Explain ZENAGE.')).toBe(true);
+          expect(sentRequest(index).messages.some(message =>
+            message.role === 'tool' && message.content.includes(product.description))).toBe(true);
+        }
+      }
+      expect(retrieval).not.toHaveBeenCalled();
+      expect(conversations.persistTurn).toHaveBeenCalledTimes(7);
+      expect(executeSpy.mock.calls.filter(([name]) => name === 'get_product_details')).toHaveLength(3);
+      expect(executeSpy.mock.calls.some(([name]) => name === 'knowledge_search')).toBe(false);
+      expect(sentRequest(1).messages.some(message => message.role === 'tool')).toBe(true);
+      expect(sentRequest(1).messages.find(message => message.role === 'tool')?.content).not.toContain('storefront.json');
+      const callsBefore = executeSpy.mock.calls.length;
+      if (provider === 'ollama') queueAssistant('source: public/data/storefront.json. coverage: full. historical: true.');
+      else queueCompatibleAssistant('source: public/data/storefront.json. coverage: full. historical: true.');
+      const leaked = await service.ask('Hello McZEN.', context);
+      expect(leaked.success).toBe(false);
+      expect(leaked.answer).not.toContain('storefront.json');
+      expect(executeSpy.mock.calls.length).toBe(callsBefore);
+    });
 
   function toolResults(index = 1): Array<Record<string, unknown>> {
     return sentRequest(index).messages
@@ -619,7 +863,9 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
   });
 
   it('honors reduced environment limits without adding a finalization round', async () => {
-    const config = { values: readAgentRuntimeConfig({ AGENT_MAX_ROUNDS: '1', AGENT_MAX_TOOL_CALLS: '1' }) } as AgentRuntimeConfigService;
+    const config = { values: readAgentRuntimeConfig({
+      AGENT_MAX_ROUNDS: '1', AGENT_MAX_TOOL_CALLS: '1', OLLAMA_FALLBACK_ENABLED: 'true',
+    }) } as AgentRuntimeConfigService;
     service = new AgentService(registry, executor, config, new ToolPermissionService());
     queueAssistant('', [toolCall('get_products', {})]);
     const result = await service.ask('Show items', contextFor());
@@ -976,7 +1222,7 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
   it('uses configured Ollama values without sending configuration secrets in messages', async () => {
     const config = { values: readAgentRuntimeConfig({
       OLLAMA_BASE_URL: 'http://127.0.0.1:11435', OLLAMA_MODEL: 'local-qwen:latest',
-      API_SECRET: 'secret-password',
+      API_SECRET: 'secret-password', OLLAMA_FALLBACK_ENABLED: 'true',
     }) } as AgentRuntimeConfigService;
     service = new AgentService(registry, executor, config, new ToolPermissionService());
     queueResponse({ model: 'secret-password /internal/path', message: { tool_calls: [toolCall('get_products', {})] } });
@@ -1004,7 +1250,7 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     service = new AgentService(
       registry,
       executor,
-      { values: readAgentRuntimeConfig({}) } as AgentRuntimeConfigService,
+      { values: readAgentRuntimeConfig({ OLLAMA_FALLBACK_ENABLED: 'true' }) } as AgentRuntimeConfigService,
       new ToolPermissionService(),
       conversations as unknown as ConversationsService,
     );

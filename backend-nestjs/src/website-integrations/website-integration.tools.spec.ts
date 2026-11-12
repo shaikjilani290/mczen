@@ -29,7 +29,7 @@ describe('website assistant tools', () => {
 
   it('uses the verified tenant and assistant, never model-provided scope', async () => {
     await tools.search_website_content.handler({ query: 'returns' }, context, signal);
-    expect(searchPages).toHaveBeenCalledWith(context.tenantId, context.assistantId, 'returns', null, 5);
+    expect(searchPages).toHaveBeenCalledWith(context.tenantId, context.assistantId, 'returns', null, 5, undefined);
   });
 
   it('disambiguates product searches by a validated integration ID', async () => {
@@ -63,7 +63,7 @@ describe('website assistant tools', () => {
 
   it('keeps FAQ search restricted to FAQ page records', async () => {
     await tools.search_website_faqs.handler({ query: 'returns' }, context, signal);
-    expect(searchPages).toHaveBeenCalledWith(context.tenantId, context.assistantId, 'returns', 'faq', 5);
+    expect(searchPages).toHaveBeenCalledWith(context.tenantId, context.assistantId, 'returns', 'faq', 5, undefined);
   });
   it('adds selected rendered sections to the permission-scoped detail record without replacing stored facts', async () => {
     const sections = [{ title: 'Composition', content: 'Recorded ingredients and amounts.' }];

@@ -23,6 +23,19 @@ fixture are not silently reported as passed.
 The starter notes below describe the original Express demo, not the active
 merchant integration.
 
+### Storefront widget appearance
+
+The shared widget uses a rounded dark surface, McZEN teal accents, outlined
+customer messages, expanded product cards and a dedicated animated voice-orb
+screen. Mobile sizing respects dynamic viewport height and safe-area insets;
+reduced-motion preferences disable the orb animations. Voice controls still
+follow backend availability, and the keyboard control returns to the same chat.
+Closing or minimizing the panel stops voice and returns focus to the launcher,
+which remains available to reopen the same conversation without refreshing.
+Only the SDK's explicit `destroy()` method removes the widget.
+Run `npm run build:widget` from `frontend` after changing the shared widget so
+storefronts serving the SDK build receive the updated design.
+
 Standalone starter to prepare the agent before receiving the existing McZEN React/Node.js source.
 
 ## Included

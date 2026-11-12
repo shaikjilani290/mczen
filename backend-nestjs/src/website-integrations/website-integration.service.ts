@@ -201,6 +201,32 @@ export class WebsiteIntegrationService {
     return this.integrations.listKnowledge(tenantId, integrationId, page, pageSize);
   }
 
+  async rebuildIndex(integrationId: string) {
+    const tenantId = this.tenant().tenantId;
+    await this.integrations.record(tenantId, integrationId);
+    const pages = await this.integrations.pagesForReindex(tenantId, integrationId);
+    let indexed = 0;
+    for (const page of pages) {
+      if (!Buffer.isBuffer(page.article_id) && !(page.article_id instanceof Uint8Array)) {
+        throw new ServiceUnavailableException('A website knowledge record has an invalid article reference.');
+      }
+      const articleId = Buffer.from(page.article_id as Uint8Array);
+      const content = [page.title, page.summary, page.content].filter(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      ).join('\n\n');
+      const language = typeof page.language_code === 'string' ? page.language_code : 'en';
+      await this.knowledge.transaction((manager) => this.knowledge.replaceChunks(
+        manager,
+        { articleId },
+        chunkText(content),
+        language,
+      ));
+      indexed += 1;
+    }
+    await this.integrations.refreshCounts(tenantId, integrationId);
+    return { id: integrationId, status: 'completed' as const, indexed };
+  }
+
   private async authenticateIngestion(key: string | undefined): Promise<WebsiteIntegrationRecord> {
     if (!key || !/^mzi_[A-Za-z0-9_-]{43}$/.test(key)) throw new UnauthorizedException('Integration credentials are invalid.');
     await this.limiter.hit(`website-ingest:key:${digest(key)}`, 300);

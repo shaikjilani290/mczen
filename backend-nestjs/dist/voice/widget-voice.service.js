@@ -22,6 +22,7 @@ const vad_port_1 = require("./vad/vad.port");
 const voice_auth_service_1 = require("./voice-auth.service");
 const voice_ticket_service_1 = require("./voice-ticket.service");
 const HEALTH_CACHE_MS = 15_000;
+const UNHEALTHY_CACHE_MS = 1_000;
 const WIDGET_VOICE_PERMISSIONS = Object.freeze(['knowledge:read', 'products:read', 'inventory:read']);
 let WidgetVoiceService = WidgetVoiceService_1 = class WidgetVoiceService {
     auth;
@@ -103,7 +104,8 @@ let WidgetVoiceService = WidgetVoiceService_1 = class WidgetVoiceService {
     }
     async unavailableEngines() {
         const now = Date.now();
-        if (this.health && now - this.health.at < HEALTH_CACHE_MS)
+        const cacheMs = this.health?.unavailable.length ? UNHEALTHY_CACHE_MS : HEALTH_CACHE_MS;
+        if (this.health && now - this.health.at < cacheMs)
             return this.health.unavailable;
         const engines = ['stt', 'tts', 'vad'];
         this.probing ??= Promise.all([this.stt, this.tts, this.vad].map(async (port) => {

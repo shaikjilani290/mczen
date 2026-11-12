@@ -4,12 +4,14 @@ import { Injectable } from '@nestjs/common';
 export type LlmProvider = 'ollama' | 'openai-compatible';
 
 export interface AgentRuntimeConfig {
+  readonly responseMode: 'no-llm' | 'conversational';
   readonly llmProvider: LlmProvider;
   readonly llmBaseUrl: string;
   readonly llmModel: string;
   readonly ollamaBaseUrl: string;
   readonly ollamaModel: string;
   readonly ollamaTimeoutMs: number;
+  readonly ollamaFallbackEnabled: boolean;
   readonly maxRounds: number;
   readonly maxToolCalls: number;
 }
@@ -74,6 +76,10 @@ function validatedBaseUrl(raw: string, settingName: string): string {
 export function readAgentRuntimeConfig(
   env: NodeJS.ProcessEnv,
 ): Readonly<AgentRuntimeConfig> {
+  const responseMode = env['AGENT_RESPONSE_MODE'] ?? 'no-llm';
+  if (responseMode !== 'no-llm' && responseMode !== 'conversational') {
+    return invalidSetting('AGENT_RESPONSE_MODE');
+  }
   const provider = env['LLM_PROVIDER'] ?? 'ollama';
 
   if (provider !== 'ollama' && provider !== 'openai-compatible') {
@@ -104,12 +110,19 @@ export function readAgentRuntimeConfig(
     return invalidSetting('LLM_MODEL');
   }
 
+  const fallbackSetting = env['OLLAMA_FALLBACK_ENABLED'] ?? 'false';
+  if (fallbackSetting !== 'true' && fallbackSetting !== 'false') {
+    return invalidSetting('OLLAMA_FALLBACK_ENABLED');
+  }
+
   return Object.freeze({
+    responseMode,
     llmProvider: provider,
     llmBaseUrl,
     llmModel,
     ollamaBaseUrl,
     ollamaModel,
+    ollamaFallbackEnabled: fallbackSetting === 'true',
     ollamaTimeoutMs: integerSetting(
       env,
       'OLLAMA_TIMEOUT_MS',

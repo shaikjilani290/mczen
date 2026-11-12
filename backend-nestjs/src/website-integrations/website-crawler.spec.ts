@@ -59,6 +59,27 @@ describe('WebsiteCrawler extraction and URL safety', () => {
     expect(fetched.some((url) => url.endsWith('/private'))).toBe(false);
   });
 
+  it('classifies FAQ and policy pages from their headings when URL paths are generic', async () => {
+    const crawler = new WebsiteCrawler() as unknown as {
+      resolvePublic(host: string): Promise<unknown>;
+      readRobots(origin: string): Promise<{ rules: Array<{ allow: boolean; path: string }>; sitemaps: string[] }>;
+      fetchText(url: string, origin: string, acceptedTypes: string): Promise<string>;
+      crawl(origin: string): Promise<{ pages: Array<{ url: string; pageType: string }>; errors: string[] }>;
+    };
+    crawler.resolvePublic = async () => [{ address: '93.184.216.34', family: 4 }];
+    crawler.readRobots = async () => ({ rules: [], sitemaps: [] });
+    crawler.fetchText = async (url) => {
+      if (url.endsWith('/questions')) return '<main><h1>Frequently Asked Questions</h1><p>Answers to common shopping questions.</p></main>';
+      if (url.endsWith('/store-info')) return '<main><h1>Returns Policy</h1><p>Items may be returned within thirty days of delivery.</p></main>';
+      return '<main><h1>Shop</h1><p>Welcome to the store and browse our products.</p><a href="/questions">Questions</a><a href="/store-info">Store information</a></main>';
+    };
+
+    const result = await crawler.crawl('https://shop.example.com');
+
+    expect(result.pages.find((page) => page.url.endsWith('/questions'))?.pageType).toBe('faq');
+    expect(result.pages.find((page) => page.url.endsWith('/store-info'))?.pageType).toBe('policy');
+  });
+
   it('fails closed when robots.txt cannot be retrieved for a reason other than not found', async () => {
     const crawler = new WebsiteCrawler() as unknown as {
       fetchText(url: string, origin: string, acceptedTypes: string): Promise<string>;

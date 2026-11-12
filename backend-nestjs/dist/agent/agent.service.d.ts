@@ -6,6 +6,7 @@ import { ToolRegistryService } from './tools/tool-registry.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { MerchantCartService } from '../website-integrations/merchant-cart.service';
 import { ProductIdentityService } from '../website-integrations/product-identity.service';
+import { WebsiteKnowledgeEngine } from '../website-integrations/website-knowledge.engine';
 export interface AgentTurnOptions {
     signal?: AbortSignal;
     onText?: (text: string) => void;
@@ -42,8 +43,9 @@ export declare class AgentService {
     private readonly conversations?;
     private readonly merchantCart?;
     private readonly productIdentity?;
+    private readonly websiteKnowledge?;
     private readonly logger;
-    constructor(toolRegistry: ToolRegistryService, toolExecutor: ToolExecutorService, config: AgentRuntimeConfigService, permissions: ToolPermissionService, conversations?: ConversationsService | undefined, merchantCart?: MerchantCartService | undefined, productIdentity?: ProductIdentityService | undefined);
+    constructor(toolRegistry: ToolRegistryService, toolExecutor: ToolExecutorService, config: AgentRuntimeConfigService, permissions: ToolPermissionService, conversations?: ConversationsService | undefined, merchantCart?: MerchantCartService | undefined, productIdentity?: ProductIdentityService | undefined, websiteKnowledge?: WebsiteKnowledgeEngine | undefined);
     private isApplicationQuestion;
     private isUrgentSymptomQuestion;
     ask(question: string, context: AgentExecutionContext, options?: AgentTurnOptions): Promise<AgentResponse>;

@@ -7,7 +7,7 @@ function installCaptureProcessor() {
       this.ring = new Int16Array(32000);
       this.read = 0;
       this.count = 0;
-      this.credit = 2;
+      this.credit = 4;
       this.failed = false;
       this.epoch = 0;
       this.phase = 0;
@@ -19,9 +19,9 @@ function installCaptureProcessor() {
           this.phase = this.sum = this.samples = 0;
           if (this.diagnostics) this.levels = { source: this.emptyLevels(), resampled: this.emptyLevels() };
           this.epoch = data.epoch;
-          this.credit = 2;
+          this.credit = 4;
         } else if (data.type === "credit" && data.epoch === this.epoch) {
-          this.credit = Math.min(2, this.credit + (data.count ?? 1));
+          this.credit = Math.min(4, this.credit + (data.count ?? 1));
         }
       };
     }

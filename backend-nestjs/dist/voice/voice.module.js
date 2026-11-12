@@ -19,6 +19,8 @@ const stt_port_1 = require("./stt/stt.port");
 const silero_vad_adapter_1 = require("./vad/silero-vad.adapter");
 const vad_port_1 = require("./vad/vad.port");
 const piper_adapter_1 = require("./tts/piper.adapter");
+const dhvaani_adapter_1 = require("./tts/dhvaani.adapter");
+const composite_tts_adapter_1 = require("./tts/composite-tts.adapter");
 const tts_port_1 = require("./tts/tts.port");
 const voice_auth_service_1 = require("./voice-auth.service");
 const voice_gateway_1 = require("./voice.gateway");
@@ -51,10 +53,12 @@ exports.VoiceModule = VoiceModule = __decorate([
             configured_stt_adapter_1.ConfiguredSttAdapter,
             silero_vad_adapter_1.SileroVadAdapter,
             piper_adapter_1.PiperAdapter,
+            dhvaani_adapter_1.DhvaaniAdapter,
+            composite_tts_adapter_1.CompositeTtsAdapter,
             agent_invocation_adapter_1.AgentInvocationAdapter,
             { provide: stt_port_1.SPEECH_TO_TEXT, useExisting: configured_stt_adapter_1.ConfiguredSttAdapter },
             { provide: vad_port_1.VOICE_ACTIVITY, useExisting: silero_vad_adapter_1.SileroVadAdapter },
-            { provide: tts_port_1.TEXT_TO_SPEECH, useExisting: piper_adapter_1.PiperAdapter },
+            { provide: tts_port_1.TEXT_TO_SPEECH, useExisting: composite_tts_adapter_1.CompositeTtsAdapter },
             { provide: agent_invocation_port_1.AGENT_INVOCATION, useExisting: agent_invocation_adapter_1.AgentInvocationAdapter },
         ],
     })

@@ -303,10 +303,12 @@ function extractPage(html, pageUrl, origin) {
         html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
     const mainContent = cleanText(body);
     const path = new URL(pageUrl).pathname.toLowerCase();
-    const pageType = /faq|frequently-asked/.test(path) ? 'faq'
-        : /product/.test(path) ? 'product'
-            : /service/.test(path) ? 'service'
-                : /policy|privacy|terms|return/.test(path) ? 'policy' : 'page';
+    const pageHints = `${path} ${title} ${headings.join(' ')}`.toLowerCase();
+    const pageType = /faq|frequently[- ]asked|common questions/.test(pageHints) ? 'faq'
+        : /product/.test(pageHints) ? 'product'
+            : /service/.test(pageHints) ? 'service'
+                : /policy|privacy|terms|return|refund|shipping|delivery|warranty/.test(pageHints) ? 'policy'
+                    : /category|categories|collection/.test(pageHints) ? 'category' : 'page';
     return { url: pageUrl, title: title.slice(0, 200), metaDescription, mainContent, headings, links, pageType, lastUpdatedAt };
 }
 //# sourceMappingURL=website-crawler.js.map

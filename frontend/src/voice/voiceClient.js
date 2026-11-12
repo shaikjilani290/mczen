@@ -151,11 +151,18 @@ export class VoiceClient {
     this.startupAbort = null;
     this.cancelStartup = null;
     this.startupStage = "idle";
+    this.stoppedPlayback = new WeakSet();
   }
 
-  diagnose(stage) {
+  diagnose(stage, details = {}) {
     this.startupStage = stage;
-    this.onDiagnostic({ stage, elapsedMs: Math.round(performance.now() - (this.startupAt ?? performance.now())) });
+    this.onDiagnostic({
+      stage,
+      elapsedMs: Math.round(performance.now() - (this.startupAt ?? performance.now())),
+      sessionId: this.sessionId ?? undefined,
+      epoch: this.epoch,
+      ...details,
+    });
   }
 
   async start(accessToken, options) {
@@ -366,7 +373,20 @@ export class VoiceClient {
     if (typeof data !== "string") {
       const buffer = data instanceof ArrayBuffer ? data : await data.arrayBuffer?.();
       const frame = decodeAudioFrame(buffer);
-      if (frame) this.queuePlayback(frame);
+      if (frame) {
+        this.diagnose("audio_frame_received", {
+          frameBytes: buffer.byteLength,
+          audioBytes: frame.pcm.byteLength,
+          sequence: frame.sequence,
+          frameEpoch: frame.epoch,
+        });
+        this.queuePlayback(frame);
+      } else {
+        this.diagnose("audio_frame_rejected", {
+          frameBytes: buffer?.byteLength ?? 0,
+          reason: "invalid_binary_frame",
+        });
+      }
       return;
     }
     let event;
@@ -377,6 +397,15 @@ export class VoiceClient {
       return;
     }
     if (event?.v !== 1 || typeof event.type !== "string" || !event.data) return;
+    const isSessionHandshake = event.type === "voice.session.started" || event.type === "voice.session.resumed";
+    if (this.sessionId && event.sessionId && event.sessionId !== this.sessionId && !isSessionHandshake) {
+      this.diagnose("voice_event_session_mismatch_dropped", {
+        expectedSessionId: this.sessionId,
+        receivedSessionId: event.sessionId,
+        eventType: event.type,
+      });
+      return;
+    }
     if (event.type === "voice.session.resume_token") {
       if (typeof event.data.token === "string") this.resumeToken = event.data.token;
       return;
@@ -422,6 +451,32 @@ export class VoiceClient {
     }
     if (event.sessionId) this.sessionId = event.sessionId;
     const eventEpoch = Number.isInteger(event.epoch) ? event.epoch : event.data.epoch;
+    if (event.type === "voice.assistant.response") {
+      this.diagnose("assistant_response_received", {
+        eventSessionId: event.sessionId,
+        turnId: event.data.turnId,
+        answerChars: typeof event.data.answer === "string" ? event.data.answer.length : 0,
+        success: event.data.success === true,
+        responseEpoch: eventEpoch,
+        epochMatches: !Number.isInteger(eventEpoch) || eventEpoch === this.epoch,
+      });
+    }
+    if (event.type === "voice.assistant.audio.chunk") {
+      this.metrics.turnId = event.data.turnId ?? this.metrics.turnId;
+      this.diagnose("audio_chunk_announced", {
+        eventSessionId: event.sessionId,
+        turnId: event.data.turnId,
+        responseEpoch: eventEpoch,
+        epochMatches: !Number.isInteger(eventEpoch) || eventEpoch === this.epoch,
+        sampleRate: event.data.sampleRate,
+      });
+    }
+    if (event.type === "voice.assistant.audio.end") {
+      this.diagnose("audio_generation_ended", {
+        turnId: event.data.turnId,
+        outputAudioMs: event.data.totalMs,
+      });
+    }
     if (Number.isInteger(eventEpoch) && eventEpoch !== this.epoch) {
       const normalCompletion = event.type === "voice.assistant.epoch" && event.data.reason === "turn_reset";
       // Generation can finish before already-scheduled speech finishes playing.
@@ -553,7 +608,9 @@ export class VoiceClient {
             epoch: data.epoch, source: data.source, resampled: data.resampled });
           return;
         }
-        if (data.type === "overflow") return this.captureOverflow();
+        if (data.type === "overflow") return this.captureOverflow({
+          source: "AudioWorklet", bufferedMs: data.bufferedMs,
+        });
         if (data.type !== "audio" || data.epoch !== this.epoch) return;
         const now = performance.now();
         this.metrics.capturedMs += data.pcm.length / 16;
@@ -614,8 +671,22 @@ export class VoiceClient {
     this.processor?.port?.postMessage({ type: "reset", epoch: this.epoch });
   }
 
-  captureOverflow() {
-    this.onError("Microphone audio exceeded the 2-second buffer while processing was paused. Voice stopped to avoid transcribing incomplete speech. Please start again.");
+  captureOverflow(details = {}) {
+    const inFlightBytes = [...this.inFlight.values()].reduce((sum, frame) => sum + frame.bytes, 0);
+    this.diagnose("capture_buffer_overflow", {
+      ...details,
+      source: details.source ?? this.metrics.captureMode ?? "ScriptProcessor",
+      serverPaused: this.serverPaused,
+      inFlightBytes,
+      pendingMs: this.pendingSamples.length / 16 +
+        this.pendingFrames.reduce((sum, frame) => sum + frame.pcm.length / 16, 0),
+      webSocketBufferedBytes: this.socket?.bufferedAmount ?? 0,
+      visibility: globalThis.document?.visibilityState,
+      contextState: this.audioContext?.state,
+    });
+    this.onError(this.serverPaused || inFlightBytes >= 16000
+      ? "Microphone audio exceeded the 2-second buffer while the voice service was congested. Voice stopped to avoid incomplete speech. Please start again."
+      : "The browser could not process microphone audio within the 2-second buffer. Voice stopped to avoid incomplete speech. Keep this tab active, close heavy applications, and start again.");
     void this.stop();
   }
 
@@ -625,7 +696,13 @@ export class VoiceClient {
     if (!this.pendingFrames.length && this.pendingSamples.length < FRAME_SAMPLES) return;
     const now = performance.now();
     const inFlightBytes = [...this.inFlight.values()].reduce((sum, frame) => sum + frame.bytes, 0);
-    if (this.flowControl && inFlightBytes >= 16000) return;
+    const availableBytes = Math.min(12800, this.flowControl ? 16000 - inFlightBytes : 12800);
+    if (availableBytes < FRAME_SAMPLES * 2) return;
+    const queuedBytes = this.pendingFrames.length
+      ? this.pendingFrames.reduce((sum, frame) => sum + frame.pcm.byteLength, 0)
+      : Math.floor(this.pendingSamples.length / FRAME_SAMPLES) * FRAME_SAMPLES * 2;
+    // Let existing requests drain rather than perpetuating tiny requests when VAD is slow.
+    if (availableBytes < Math.min(12800, queuedBytes)) return;
     // Schedule against the last actual send, not a drifting polling interval.
     const delay = Math.max(0, 50 - (now - this.lastSendAt));
     if (delay > 0 || this.socket.bufferedAmount > 6400) {
@@ -637,7 +714,9 @@ export class VoiceClient {
     }
     let frame = this.pendingFrames.shift();
     let credits = frame ? 1 : 0;
-    if (frame && this.pendingFrames.length && (!this.flowControl || inFlightBytes <= 9600)) {
+    // Catch up in batches of at most 400 ms while retaining the 500 ms ingress ceiling.
+    while (frame && this.pendingFrames.length &&
+        frame.pcm.byteLength + this.pendingFrames[0].pcm.byteLength <= availableBytes) {
       const next = this.pendingFrames.shift();
       const pcm = new Int16Array(frame.pcm.length + next.pcm.length);
       pcm.set(frame.pcm);
@@ -646,9 +725,11 @@ export class VoiceClient {
       credits++;
     }
     if (!frame && this.pendingSamples.length >= FRAME_SAMPLES) {
-      frame = { pcm: floatToPcm16(this.pendingSamples.subarray(0, FRAME_SAMPLES)),
-        capturedAt: now - this.pendingSamples.length / 16 + FRAME_INTERVAL_MS };
-      this.pendingSamples = this.pendingSamples.slice(FRAME_SAMPLES);
+      const samples = Math.min(Math.floor(this.pendingSamples.length / FRAME_SAMPLES),
+        Math.floor(availableBytes / (FRAME_SAMPLES * 2))) * FRAME_SAMPLES;
+      frame = { pcm: floatToPcm16(this.pendingSamples.subarray(0, samples)),
+        capturedAt: now - this.pendingSamples.length / 16 + samples / 16 };
+      this.pendingSamples = this.pendingSamples.slice(samples);
     }
     if (!frame) return;
     this.socket.send(encodeAudioFrame({ epoch: this.epoch, sequence: this.sequence, pcm: frame.pcm }));
@@ -676,34 +757,121 @@ export class VoiceClient {
   }
 
   queuePlayback(frame) {
-    if (!this.audioContext || frame.epoch !== this.epoch) return;
-    const buffer = this.audioContext.createBuffer(1, frame.pcm.length, 16000);
-    const channel = buffer.getChannelData(0);
-    for (let index = 0; index < frame.pcm.length; index += 1) channel[index] = frame.pcm[index] / 32768;
-    const source = this.audioContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(this.audioContext.destination);
-    const when = Math.max(this.audioContext.currentTime + 0.02, this.nextAudioTime);
-    this.nextAudioTime = when + buffer.duration;
-    this.playing.add(source);
-    if (this.metrics.firstPlaybackMs === undefined && this.utteranceCaptureAt !== undefined) {
-      this.metrics.firstPlaybackMs = performance.now() - this.utteranceCaptureAt + Math.max(0, when - this.audioContext.currentTime) * 1000;
-      this.reportMetrics(true);
+    const context = this.audioContext;
+    if (!context) {
+      this.diagnose("audio_playback_failed", {
+        sequence: frame.sequence,
+        frameEpoch: frame.epoch,
+        reason: "audio_context_missing",
+        playbackStatus: "not_played",
+      });
+      return;
     }
-    source.onended = () => {
-      this.playing.delete(source);
-      if (!this.playing.size && this.outputGenerationEnded && this.utteranceCaptureAt !== undefined) {
-        this.metrics.completePlaybackMs = performance.now() - this.utteranceCaptureAt;
+    if (frame.epoch !== this.epoch) {
+      this.diagnose("audio_frame_dropped", {
+        sequence: frame.sequence,
+        frameEpoch: frame.epoch,
+        reason: "stale_epoch",
+        playbackStatus: "not_played",
+      });
+      return;
+    }
+    if (context.state === "suspended" && typeof context.resume === "function") {
+      this.diagnose("audio_context_resume_requested", {
+        sequence: frame.sequence,
+        contextState: context.state,
+      });
+      void context.resume().then(() => {
+        if (this.audioContext !== context || frame.epoch !== this.epoch) {
+          this.diagnose("audio_playback_failed", {
+            sequence: frame.sequence,
+            frameEpoch: frame.epoch,
+            reason: "session_changed_during_resume",
+            playbackStatus: "not_played",
+          });
+          return;
+        }
+        this.schedulePlayback(frame, context);
+      }).catch((issue) => {
+        this.diagnose("audio_playback_failed", {
+          sequence: frame.sequence,
+          frameEpoch: frame.epoch,
+          reason: "audio_context_resume_rejected",
+          errorName: issue?.name ?? "Error",
+          playbackStatus: "not_played",
+        });
+        this.onError("The voice response audio could not be played. You can still read the text response.");
+      });
+      return;
+    }
+    this.schedulePlayback(frame, context);
+  }
+
+  schedulePlayback(frame, context) {
+    const priorNextAudioTime = this.nextAudioTime;
+    let source;
+    try {
+      const buffer = context.createBuffer(1, frame.pcm.length, 16000);
+      const channel = buffer.getChannelData(0);
+      for (let index = 0; index < frame.pcm.length; index += 1) channel[index] = frame.pcm[index] / 32768;
+      source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      const when = Math.max(context.currentTime + 0.02, this.nextAudioTime);
+      this.nextAudioTime = when + buffer.duration;
+      this.playing.add(source);
+      if (this.metrics.firstPlaybackMs === undefined && this.utteranceCaptureAt !== undefined) {
+        this.metrics.firstPlaybackMs = performance.now() - this.utteranceCaptureAt + Math.max(0, when - context.currentTime) * 1000;
         this.reportMetrics(true);
       }
-    };
-    source.start(when);
+      source.onended = () => {
+        this.playing.delete(source);
+        const playbackStatus = this.stoppedPlayback.has(source) ? "stopped" : "played";
+        this.diagnose("audio_playback_ended", {
+          sequence: frame.sequence,
+          frameEpoch: frame.epoch,
+          audioBytes: frame.pcm.byteLength,
+          contextState: context.state,
+          playbackStatus,
+        });
+        if (!this.playing.size && this.outputGenerationEnded && this.utteranceCaptureAt !== undefined) {
+          this.metrics.completePlaybackMs = performance.now() - this.utteranceCaptureAt;
+          this.reportMetrics(true);
+        }
+      };
+      source.start(when);
+      this.diagnose("audio_playback_started", {
+        sequence: frame.sequence,
+        frameEpoch: frame.epoch,
+        audioBytes: frame.pcm.byteLength,
+        contextState: context.state,
+        scheduledAt: when,
+        playbackStatus: "scheduled",
+      });
+    } catch (issue) {
+      if (source) this.playing.delete(source);
+      this.nextAudioTime = priorNextAudioTime;
+      this.diagnose("audio_playback_failed", {
+        sequence: frame.sequence,
+        frameEpoch: frame.epoch,
+        audioBytes: frame.pcm.byteLength,
+        contextState: context.state,
+        errorName: issue?.name ?? "Error",
+        playbackStatus: "not_played",
+      });
+      this.onError("The voice response audio could not be played. You can still read the text response.");
+    }
   }
 
   clearPlayback() {
     this.outputGenerationEnded = false;
     for (const source of this.playing) {
-      try { source.stop(); } catch { /* a source can finish between interruption and stop */ }
+      try {
+        this.stoppedPlayback.add(source);
+        source.stop();
+      } catch {
+        this.diagnose("audio_playback_stop_failed", { errorName: "InvalidStateError" });
+      }
     }
     this.playing.clear();
     this.nextAudioTime = this.audioContext?.currentTime ?? 0;

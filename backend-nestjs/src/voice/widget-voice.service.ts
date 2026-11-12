@@ -8,6 +8,7 @@ import { VoiceTicketService } from './voice-ticket.service';
 import type { VoiceLanguage } from './voice.types';
 
 const HEALTH_CACHE_MS = 15_000;
+const UNHEALTHY_CACHE_MS = 1_000;
 /** Anonymous visitors can only use voice for the same public catalogue permissions as widget text. */
 const WIDGET_VOICE_PERMISSIONS = Object.freeze(['knowledge:read', 'products:read', 'inventory:read']);
 
@@ -107,7 +108,8 @@ export class WidgetVoiceService {
 
   private async unavailableEngines(): Promise<Array<'stt' | 'tts' | 'vad'>> {
     const now = Date.now();
-    if (this.health && now - this.health.at < HEALTH_CACHE_MS) return this.health.unavailable;
+    const cacheMs = this.health?.unavailable.length ? UNHEALTHY_CACHE_MS : HEALTH_CACHE_MS;
+    if (this.health && now - this.health.at < cacheMs) return this.health.unavailable;
     const engines = ['stt', 'tts', 'vad'] as const;
     this.probing ??= Promise.all([this.stt, this.tts, this.vad].map(async (port) => {
       try { return await port.healthCheck(); } catch { return false; }
