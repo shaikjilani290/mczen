@@ -31,7 +31,7 @@ export const widgetCorsOptions: CorsOptions = {
 /** Exact dashboard origins, no wildcards/credentials; widget origins are validated per tenant. */
 export function readCorsOptions(env: Record<string, string | undefined> = process.env): CorsOptions {
   const production = env.NODE_ENV === 'production';
-  const raw = env.MCZEN_CORS_ORIGINS ?? (production ? '' : 'http://localhost:5174,http://127.0.0.1:5174');
+  const raw = env.MCZEN_CORS_ORIGINS ?? (production ? '' : 'http://localhost:5174,http://127.0.0.1:5174,https://mczenai.aajcodershub.com');
   if (raw.length > 8192) throw new CorsConfigError('MCZEN_CORS_ORIGINS is too long.');
   const origins = raw.split(',').map((value) => value.trim()).filter(Boolean);
   if (origins.length > 32) throw new CorsConfigError('MCZEN_CORS_ORIGINS allows at most 32 origins.');
