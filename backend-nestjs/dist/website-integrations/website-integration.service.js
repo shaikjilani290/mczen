@@ -120,37 +120,229 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
     }
     async runSync(record) {
         let pages = 0;
+        let products = 0;
         let indexed = 0;
         const errors = [];
         try {
             const result = await this.crawler.crawl(record.origin, (count) => this.integrations.setSyncDiscovery(record.tenantId, record.id, count));
             for (const page of result.pages) {
                 try {
-                    const saved = await this.withIntegrationContext(record, () => this.savePage(record, { ...page, language: 'en', status: 'active' }));
+                    const saved = await this.withIntegrationContext(record, () => this.savePage(record, {
+                        ...page,
+                        language: 'en',
+                        status: 'active',
+                    }));
                     pages += 1;
                     if (saved.indexed)
                         indexed += 1;
                 }
                 catch {
                     errors.push(`${new URL(page.url).pathname}: page could not be indexed`);
+                }
+            }
+            errors.push(...result.errors.slice(0, Math.max(0, 50 - errors.length)));
+            try {
+                const imported = await this.importStorefrontProducts(record);
+                products = imported.accepted;
+                errors.push(...imported.errors.slice(0, Math.max(0, 50 - errors.length)));
+            }
+            catch (error) {
+                const message = error instanceof Error
+                    ? error.message.slice(0, 200)
+                    : 'Storefront product import failed.';
+                errors.push(`Product import: ${message}`);
+            }
+            await this.deactivateMissingPages(record);
+            await this.integrations.refreshCounts(record.tenantId, record.id);
+            await this.integrations.finishSync(record.tenantId, record.id, {
+                status: errors.length > 0 && pages === 0 && products === 0
+                    ? 'failed'
+                    : 'completed',
+                pages,
+                products,
+                indexed,
+                errors: errors.slice(0, 50),
+            });
+        }
+        catch (error) {
+            const message = error instanceof Error
+                ? error.message.slice(0, 200)
+                : 'Crawler failed.';
+            await this.integrations.finishSync(record.tenantId, record.id, {
+                status: 'failed',
+                pages,
+                products,
+                indexed,
+                errors: [message],
+            });
+        }
+    }
+    async importStorefrontProducts(record) {
+        const catalog = await this.crawler.fetchStorefrontCatalog(record.origin);
+        if (!catalog) {
+            return { accepted: 0, errors: [] };
+        }
+        const data = catalog;
+        const sourceProducts = data.products;
+        const details = data.details;
+        const assets = data.assets;
+        const getText = (value) => {
+            if (typeof value === 'string' && value.trim()) {
+                return value.trim();
+            }
+            if (typeof value === 'number' || typeof value === 'boolean') {
+                return String(value);
+            }
+            return null;
+        };
+        const getNumber = (value) => {
+            const number = typeof value === 'number'
+                ? value
+                : typeof value === 'string'
+                    ? Number(value)
+                    : NaN;
+            return Number.isFinite(number) ? number : null;
+        };
+        const findDetail = (key) => {
+            const direct = details[key];
+            if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+                return direct;
+            }
+            const matchedKey = Object.keys(details).find((item) => item.toLowerCase() === key.toLowerCase());
+            const matched = matchedKey ? details[matchedKey] : undefined;
+            return matched && typeof matched === 'object' && !Array.isArray(matched)
+                ? matched
+                : {};
+        };
+        const getImages = (product, detail) => {
+            const imageEntries = Array.isArray(detail.Images)
+                ? detail.Images
+                : [];
+            const imageKeys = imageEntries
+                .filter((image) => image.IsPrimary === true || image.SortOrder === 1)
+                .concat(imageEntries)
+                .map((image) => getText(image.ImageKey))
+                .filter((key) => Boolean(key));
+            const fallbackKey = getText(detail.ImageKey) ?? getText(product.ImageKey);
+            if (fallbackKey)
+                imageKeys.push(fallbackKey);
+            const uniqueKeys = [...new Set(imageKeys)];
+            const imageUrls = [];
+            for (const imageKey of uniqueKeys) {
+                for (const variant of ['original', 'xl', 'l', 'm', 'thumb']) {
+                    const cdnUrl = `https://imagedelivery.net/Ud25niyQxx-TAH-Uqr9bjQ/${imageKey}/${variant}`;
+                    const capturedPath = getText(assets[cdnUrl]);
+                    if (!capturedPath)
+                        continue;
+                    const imageUrl = new URL(capturedPath, record.origin).toString();
+                    if (!imageUrls.includes(imageUrl)) {
+                        imageUrls.push(imageUrl);
+                    }
+                    break;
+                }
+                if (imageUrls.length >= 20)
+                    break;
+            }
+            return imageUrls;
+        };
+        let accepted = 0;
+        const errors = [];
+        await this.withIntegrationContext(record, async () => {
+            for (const source of sourceProducts) {
+                try {
+                    const productKey = getText(source.ProductKey);
+                    const productId = getText(source.ProductId);
+                    const externalProductId = productKey ?? productId;
+                    if (!externalProductId) {
+                        throw new Error('Missing product identifier');
+                    }
+                    const detail = findDetail(externalProductId);
+                    const slug = getText(source.ProductSlug) ?? getText(detail.Slug);
+                    if (!slug) {
+                        throw new Error(`Missing product slug: ${externalProductId}`);
+                    }
+                    const descriptionFields = [
+                        ['Description', detail.ProductDescription],
+                        ['Composition', detail.Composition],
+                        ['Features', detail.Features],
+                        ['Ingredients', detail.Ingredients],
+                        ['Dosage', detail.Dosage],
+                        ['How to use', detail.HowToUse],
+                        ['Storage instructions', detail.StorageInstructions],
+                        ['Warnings', detail.Warnings],
+                        ['Side effects', detail.SideEffects],
+                        ['Contraindications', detail.Contraindications],
+                        ['Terms and conditions', detail.TandC],
+                    ];
+                    const description = descriptionFields
+                        .map(([label, value]) => {
+                        const text = getText(value);
+                        return text ? `${label}:\n${text}` : null;
+                    })
+                        .filter((value) => Boolean(value))
+                        .join('\n\n')
+                        .slice(0, 100000);
+                    const stock = getNumber(detail.Stock) ?? getNumber(source.Stock);
+                    const stockStatus = (getText(detail.StockStatus) ?? getText(source.StockStatus) ?? '').toLowerCase().replace(/[\s_-]/g, '');
+                    let availability = 'unknown';
+                    if (stockStatus === 'instock' && (stock === null || stock > 0)) {
+                        availability = 'in_stock';
+                    }
+                    else if (stockStatus === 'outofstock' || stock === 0) {
+                        availability = 'out_of_stock';
+                    }
+                    else if (stockStatus.includes('preorder')) {
+                        availability = 'preorder';
+                    }
+                    else if (stockStatus.includes('discontinued')) {
+                        availability = 'discontinued';
+                    }
+                    const active = detail.IsActive !== false && source.IsActive !== false;
+                    const attributes = {
+                        productId,
+                        productCode: getText(detail.ProductCode),
+                        hsnCode: getText(detail.HSNCode),
+                        schedule: getText(detail.Schedule),
+                        unitType: getText(detail.UnitType) ?? getText(source.UnitType),
+                        weight: getNumber(detail.Weight) ?? getNumber(source.Weight),
+                        gstRate: getNumber(detail.GSTRate),
+                        discountPercent: getNumber(detail.DiscountPct) ?? getNumber(source.DiscountPct),
+                        averageRating: getNumber(detail.AverageRating) ?? getNumber(source.AverageRating),
+                        totalRatings: getNumber(detail.TotalRatings) ?? getNumber(source.TotalRatings),
+                    };
+                    const productInput = {
+                        externalProductId,
+                        name: getText(detail.ProductName) ?? getText(source.ProductName) ?? 'Unnamed product',
+                        description: description || null,
+                        sku: getText(detail.ProductCode),
+                        brand: getText(detail.ManufacturerName) ?? getText(source.ManufacturerName),
+                        category: getText(source.CatName) ?? getText(detail.CatName),
+                        price: getNumber(detail.MRP) ?? getNumber(source.MRP),
+                        salePrice: getNumber(detail.SalePrice) ?? getNumber(source.SalePrice),
+                        currency: getText(detail.CurrencyCode) ?? getText(source.CurrencyCode) ?? 'INR',
+                        stock,
+                        availability,
+                        images: getImages(source, detail),
+                        productUrl: new URL(`/product/${encodeURIComponent(slug)}`, record.origin).toString(),
+                        attributes,
+                        updatedAt: null,
+                        status: active ? 'active' : 'inactive',
+                    };
+                    const validated = (0, website_integration_dto_1.parseWebsiteProduct)(productInput, record.origin);
+                    await this.saveProduct(record, validated);
+                    accepted += 1;
+                }
+                catch (error) {
+                    const message = error instanceof Error
+                        ? error.message.slice(0, 150)
+                        : 'Unknown product import error';
+                    errors.push(`Product import skipped: ${message}`);
                     if (errors.length >= 50)
                         break;
                 }
             }
-            errors.push(...result.errors.slice(0, Math.max(0, 50 - errors.length)));
-            await this.deactivateMissingPages(record);
-            await this.integrations.refreshCounts(record.tenantId, record.id);
-            await this.integrations.finishSync(record.tenantId, record.id, {
-                status: errors.length > 0 && pages === 0 ? 'failed' : 'completed',
-                pages, products: 0, indexed, errors,
-            });
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message.slice(0, 200) : 'Crawler failed.';
-            await this.integrations.finishSync(record.tenantId, record.id, {
-                status: 'failed', pages, products: 0, indexed, errors: [message],
-            });
-        }
+        });
+        return { accepted, errors };
     }
     async deactivateMissingPages(record) {
         await this.database.transaction(async (manager) => {

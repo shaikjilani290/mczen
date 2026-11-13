@@ -21,6 +21,38 @@ export interface CrawledPage {
 }
 
 export class WebsiteCrawler {
+    async fetchStorefrontCatalog(origin: string): Promise<unknown | null> {
+    const url = new URL('/data/storefront.json', origin).toString();
+
+    try {
+      const body = await this.fetchText(url, origin, 'application/json');
+      const catalog: unknown = JSON.parse(body);
+
+      if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) {
+        throw new Error('Invalid storefront catalogue');
+      }
+
+      const data = catalog as Record<string, unknown>;
+
+      if (
+        !Array.isArray(data.products) ||
+        !data.details ||
+        typeof data.details !== 'object' ||
+        !data.assets ||
+        typeof data.assets !== 'object'
+      ) {
+        throw new Error('Storefront catalogue has an unexpected structure');
+      }
+
+      return catalog;
+    } catch (error) {
+      if (error instanceof Error && /^HTTP (?:404|410)$/.test(error.message)) {
+        return null;
+      }
+
+      throw error;
+    }
+  }
   async crawl(origin: string, onDiscovered?: (count: number) => Promise<void>): Promise<{
     pages: CrawledPage[];
     errors: string[];
@@ -152,7 +184,11 @@ export class WebsiteCrawler {
       let finished = false;
       const req = transport(url, {
         method: 'GET',
-        headers: { 'User-Agent': CRAWLER_AGENT, Accept: 'text/html,application/xml,text/xml,text/plain', 'Accept-Encoding': 'identity' },
+        headers: {
+  'User-Agent': CRAWLER_AGENT,
+  Accept: 'text/html,application/xml,text/xml,text/plain,application/json',
+  'Accept-Encoding': 'identity',
+},
         lookup: (_hostname, options, callback) => {
           if (options && typeof options === 'object' && 'all' in options && options.all) {
             callback(null, addresses);
