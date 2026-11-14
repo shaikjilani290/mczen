@@ -42,6 +42,8 @@ export declare class WebsiteIntegrationService {
         syncStatus: "running";
     }>;
     private runSync;
+    private importStorefrontPages;
+    private importStorefrontProducts;
     private deactivateMissingPages;
     pages(integrationId: string, page: number, pageSize: number): Promise<{
         [x: string]: unknown;

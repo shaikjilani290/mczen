@@ -108,10 +108,10 @@ export interface AgentProductCard {
 }
 
 const RUNTIME_ERRORS = {
-  OLLAMA_UNAVAILABLE: 'McZEN could not reach Ollama. Check that Ollama is running.',
-  OLLAMA_TIMEOUT: 'Ollama took too long to respond. Please try again.',
-  OLLAMA_HTTP_ERROR: 'Ollama could not complete the request. Please try again.',
-  OLLAMA_INVALID_RESPONSE: 'Ollama returned an invalid response. Please try again.',
+  OLLAMA_UNAVAILABLE: 'AI assistant is temporarily unavailable. Please try again shortly.',
+  OLLAMA_TIMEOUT: 'AI assistant is taking longer than expected. Please try again.',
+  OLLAMA_HTTP_ERROR: 'AI assistant could not complete your request. Please try again.',
+  OLLAMA_INVALID_RESPONSE: 'AI assistant could not process your request. Please try again.',
   OLLAMA_EMPTY_RESPONSE: 'I could not generate an answer. Please try again.',
   OLLAMA_UNEXPECTED_TOOL_CALL: 'The model requested an unexpected follow-up action. Please ask a more specific question.',
   AGENT_ROUND_LIMIT:

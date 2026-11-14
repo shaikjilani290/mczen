@@ -12,6 +12,7 @@ export interface CrawledPage {
     lastUpdatedAt: Date | null;
 }
 export declare class WebsiteCrawler {
+    fetchStorefrontCatalog(origin: string): Promise<unknown | null>;
     crawl(origin: string, onDiscovered?: (count: number) => Promise<void>): Promise<{
         pages: CrawledPage[];
         errors: string[];

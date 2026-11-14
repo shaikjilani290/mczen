@@ -11,6 +11,31 @@ const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 7000;
 const CRAWLER_AGENT = 'McZENBot/1.0 (+https://mczen.in/bot)';
 class WebsiteCrawler {
+    async fetchStorefrontCatalog(origin) {
+        const url = new URL('/data/storefront.json', origin).toString();
+        try {
+            const body = await this.fetchText(url, origin, 'application/json');
+            const catalog = JSON.parse(body);
+            if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) {
+                throw new Error('Invalid storefront catalogue');
+            }
+            const data = catalog;
+            if (!Array.isArray(data.products) ||
+                !data.details ||
+                typeof data.details !== 'object' ||
+                !data.assets ||
+                typeof data.assets !== 'object') {
+                throw new Error('Storefront catalogue has an unexpected structure');
+            }
+            return catalog;
+        }
+        catch (error) {
+            if (error instanceof Error && /^HTTP (?:404|410)$/.test(error.message)) {
+                return null;
+            }
+            throw error;
+        }
+    }
     async crawl(origin, onDiscovered) {
         const root = new URL(origin);
         await this.resolvePublic(root.hostname);
@@ -154,7 +179,11 @@ class WebsiteCrawler {
             let finished = false;
             const req = transport(url, {
                 method: 'GET',
-                headers: { 'User-Agent': CRAWLER_AGENT, Accept: 'text/html,application/xml,text/xml,text/plain', 'Accept-Encoding': 'identity' },
+                headers: {
+                    'User-Agent': CRAWLER_AGENT,
+                    Accept: 'text/html,application/xml,text/xml,text/plain,application/json',
+                    'Accept-Encoding': 'identity',
+                },
                 lookup: (_hostname, options, callback) => {
                     if (options && typeof options === 'object' && 'all' in options && options.all) {
                         callback(null, addresses);

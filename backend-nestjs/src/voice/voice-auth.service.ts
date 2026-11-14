@@ -110,7 +110,7 @@ export class VoiceAuthService {
     const row = rows[0];
     const sttEngineId = String(row.stt_engine);
     const ttsEngineId = String(row.tts_engine);
-    if (sttEngineId !== 'faster-whisper-small-int8' || ttsEngineId !== 'piper') {
+    if (sttEngineId !== 'faster-whisper-small-int8' || ttsEngineId !== 'composite') {
       throw new ForbiddenException('The configured voice engine is unavailable.');
     }
     const speechRate = selected?.rate ?? Number(row.speech_rate);

@@ -127,11 +127,7 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
             const result = await this.crawler.crawl(record.origin, (count) => this.integrations.setSyncDiscovery(record.tenantId, record.id, count));
             for (const page of result.pages) {
                 try {
-                    const saved = await this.withIntegrationContext(record, () => this.savePage(record, {
-                        ...page,
-                        language: 'en',
-                        status: 'active',
-                    }));
+                    const saved = await this.withIntegrationContext(record, () => this.savePage(record, { ...page, language: 'en', status: 'active' }));
                     pages += 1;
                     if (saved.indexed)
                         indexed += 1;
@@ -141,17 +137,13 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
                 }
             }
             errors.push(...result.errors.slice(0, Math.max(0, 50 - errors.length)));
-            try {
-                const imported = await this.importStorefrontProducts(record);
-                products = imported.accepted;
-                errors.push(...imported.errors.slice(0, Math.max(0, 50 - errors.length)));
-            }
-            catch (error) {
-                const message = error instanceof Error
-                    ? error.message.slice(0, 200)
-                    : 'Storefront product import failed.';
-                errors.push(`Product import: ${message}`);
-            }
+            const imported = await this.importStorefrontProducts(record);
+            products = imported.accepted;
+            errors.push(...imported.errors.slice(0, Math.max(0, 50 - errors.length)));
+            const pageImport = await this.importStorefrontPages(record);
+            pages += pageImport.accepted;
+            indexed += pageImport.indexed;
+            errors.push(...pageImport.errors.slice(0, Math.max(0, 50 - errors.length)));
             await this.deactivateMissingPages(record);
             await this.integrations.refreshCounts(record.tenantId, record.id);
             await this.integrations.finishSync(record.tenantId, record.id, {
@@ -167,7 +159,7 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
         catch (error) {
             const message = error instanceof Error
                 ? error.message.slice(0, 200)
-                : 'Crawler failed.';
+                : 'Crawler or product import failed.';
             await this.integrations.finishSync(record.tenantId, record.id, {
                 status: 'failed',
                 pages,
@@ -177,91 +169,243 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
             });
         }
     }
+    async importStorefrontPages(record) {
+        const catalog = await this.crawler.fetchStorefrontCatalog(record.origin);
+        if (!catalog || typeof catalog !== 'object') {
+            return { accepted: 0, indexed: 0, errors: ['Catalogue unavailable for page indexing.'] };
+        }
+        const data = catalog;
+        const products = Array.isArray(data.products)
+            ? data.products
+            : [];
+        const categories = Array.isArray(data.categories)
+            ? data.categories
+            : [];
+        const detailsValue = data.details;
+        const details = Array.isArray(detailsValue)
+            ? detailsValue
+            : detailsValue && typeof detailsValue === 'object'
+                ? Object.values(detailsValue)
+                    .filter((item) => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+                : [];
+        const scalarText = (value) => {
+            if (typeof value === 'string' && value.trim())
+                return value.trim();
+            if (typeof value === 'number' || typeof value === 'boolean')
+                return String(value);
+            return null;
+        };
+        const describe = (value) => Object.entries(value)
+            .filter(([, item]) => item !== null && item !== undefined && item !== '')
+            .map(([key, item]) => {
+            const rendered = scalarText(item) ??
+                (Array.isArray(item) ? item.map(scalarText).filter(Boolean).join(', ') : null);
+            return rendered ? `${key}: ${rendered}` : null;
+        })
+            .filter((line) => Boolean(line))
+            .join('\n');
+        const slugify = (value) => value.toLowerCase().trim()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        const pageJobs = [];
+        const productLinks = products
+            .map((product) => {
+            const name = scalarText(product.ProductName);
+            const slug = scalarText(product.ProductSlug);
+            if (!name || !slug)
+                return null;
+            return {
+                url: new URL(`/product/${encodeURIComponent(slug)}`, record.origin).toString(),
+                text: name,
+            };
+        })
+            .filter((item) => Boolean(item));
+        const settings = data.settings && typeof data.settings === 'object'
+            ? data.settings
+            : {};
+        const meta = data.meta && typeof data.meta === 'object'
+            ? data.meta
+            : {};
+        pageJobs.push({
+            path: '/',
+            title: scalarText(meta.title) || `${record.name} - Home`,
+            content: [
+                `${record.name} website homepage.`,
+                `Website: ${record.origin}`,
+                `Available catalogue products: ${products.length}`,
+                `Available catalogue categories: ${categories.length}`,
+                describe(settings),
+                describe(meta),
+            ].filter(Boolean).join('\n\n'),
+            pageType: 'page',
+            links: [
+                { url: new URL('/products', record.origin).toString(), text: 'All products' },
+                { url: new URL('/categories', record.origin).toString(), text: 'All categories' },
+                ...productLinks.slice(0, 50),
+            ].slice(0, 100),
+        });
+        pageJobs.push({
+            path: '/products',
+            title: `${record.name} - Products`,
+            content: [
+                `Product catalogue for ${record.name}.`,
+                `Total catalogue products: ${products.length}.`,
+                ...products.map((product) => {
+                    const name = scalarText(product.ProductName) || 'Unnamed product';
+                    return `${name}\n${describe(product)}`;
+                }),
+            ].join('\n\n'),
+            pageType: 'page',
+            links: productLinks.slice(0, 100),
+        });
+        pageJobs.push({
+            path: '/categories',
+            title: `${record.name} - Categories`,
+            content: [
+                `Product categories available on ${record.name}.`,
+                `Total catalogue categories: ${categories.length}.`,
+                ...categories.map((category) => describe(category)),
+            ].filter(Boolean).join('\n\n'),
+            pageType: 'category',
+            links: [],
+        });
+        for (const product of products) {
+            const name = scalarText(product.ProductName);
+            const slug = scalarText(product.ProductSlug);
+            if (!name || !slug)
+                continue;
+            const productId = scalarText(product.ProductId);
+            const productKey = scalarText(product.ProductKey);
+            const detail = details.find((item) => {
+                const ids = [
+                    item.ProductId, item.ProductKey, item.ProductCode,
+                    item.ProductSlug, item.Slug,
+                ].map(scalarText).filter(Boolean);
+                return Boolean((productId && ids.includes(productId)) ||
+                    (productKey && ids.includes(productKey)) ||
+                    ids.includes(slug));
+            });
+            pageJobs.push({
+                path: `/product/${encodeURIComponent(slug)}`,
+                title: name,
+                content: [
+                    `Product: ${name}`,
+                    `Website: ${record.origin}`,
+                    describe(product),
+                    detail ? describe(detail) : '',
+                ].filter(Boolean).join('\n\n'),
+                pageType: 'product',
+                links: [
+                    { url: new URL('/products', record.origin).toString(), text: 'All products' },
+                    { url: new URL('/categories', record.origin).toString(), text: 'Product categories' },
+                ],
+            });
+        }
+        let accepted = 0;
+        let indexed = 0;
+        const errors = [];
+        for (const job of pageJobs.slice(0, 50)) {
+            try {
+                const url = new URL(job.path, record.origin).toString();
+                const page = (0, website_integration_dto_1.parseWebsitePage)({
+                    url,
+                    title: job.title,
+                    metaDescription: null,
+                    mainContent: job.content || job.title,
+                    headings: [job.title],
+                    links: job.links,
+                    pageType: job.pageType,
+                    language: 'en',
+                    lastUpdatedAt: null,
+                    status: 'active',
+                }, record.origin);
+                const result = await this.withIntegrationContext(record, () => this.savePage(record, page));
+                accepted += 1;
+                if (result.indexed)
+                    indexed += 1;
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message.slice(0, 120) : 'Unknown error';
+                errors.push(`${job.path}: ${message}`);
+            }
+        }
+        return { accepted, indexed, errors };
+    }
     async importStorefrontProducts(record) {
         const catalog = await this.crawler.fetchStorefrontCatalog(record.origin);
         if (!catalog) {
-            return { accepted: 0, errors: [] };
+            return { accepted: 0, errors: ['No /data/storefront.json catalogue found.'] };
         }
         const data = catalog;
-        const sourceProducts = data.products;
+        const rows = data.products;
         const details = data.details;
         const assets = data.assets;
-        const getText = (value) => {
-            if (typeof value === 'string' && value.trim()) {
+        const text = (value) => {
+            if (typeof value === 'string' && value.trim())
                 return value.trim();
-            }
-            if (typeof value === 'number' || typeof value === 'boolean') {
+            if (typeof value === 'number' || typeof value === 'boolean')
                 return String(value);
+            return null;
+        };
+        const number = (value) => {
+            if (typeof value === 'number' && Number.isFinite(value))
+                return value;
+            if (typeof value === 'string' && value.trim() !== '') {
+                const parsed = Number(value);
+                if (Number.isFinite(parsed))
+                    return parsed;
             }
             return null;
         };
-        const getNumber = (value) => {
-            const number = typeof value === 'number'
-                ? value
-                : typeof value === 'string'
-                    ? Number(value)
-                    : NaN;
-            return Number.isFinite(number) ? number : null;
-        };
-        const findDetail = (key) => {
-            const direct = details[key];
-            if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
-                return direct;
-            }
-            const matchedKey = Object.keys(details).find((item) => item.toLowerCase() === key.toLowerCase());
-            const matched = matchedKey ? details[matchedKey] : undefined;
-            return matched && typeof matched === 'object' && !Array.isArray(matched)
-                ? matched
-                : {};
-        };
-        const getImages = (product, detail) => {
-            const imageEntries = Array.isArray(detail.Images)
+        const acceptedImages = (product, detail) => {
+            const entries = Array.isArray(detail.Images)
                 ? detail.Images
                 : [];
-            const imageKeys = imageEntries
-                .filter((image) => image.IsPrimary === true || image.SortOrder === 1)
-                .concat(imageEntries)
-                .map((image) => getText(image.ImageKey))
+            const keys = entries
+                .slice()
+                .sort((a, b) => {
+                const ap = a.IsPrimary === true ? 0 : Number(a.SortOrder ?? 999);
+                const bp = b.IsPrimary === true ? 0 : Number(b.SortOrder ?? 999);
+                return ap - bp;
+            })
+                .map(item => text(item.ImageKey))
                 .filter((key) => Boolean(key));
-            const fallbackKey = getText(detail.ImageKey) ?? getText(product.ImageKey);
-            if (fallbackKey)
-                imageKeys.push(fallbackKey);
-            const uniqueKeys = [...new Set(imageKeys)];
-            const imageUrls = [];
-            for (const imageKey of uniqueKeys) {
-                for (const variant of ['original', 'xl', 'l', 'm', 'thumb']) {
-                    const cdnUrl = `https://imagedelivery.net/Ud25niyQxx-TAH-Uqr9bjQ/${imageKey}/${variant}`;
-                    const capturedPath = getText(assets[cdnUrl]);
-                    if (!capturedPath)
-                        continue;
-                    const imageUrl = new URL(capturedPath, record.origin).toString();
-                    if (!imageUrls.includes(imageUrl)) {
-                        imageUrls.push(imageUrl);
-                    }
-                    break;
-                }
-                if (imageUrls.length >= 20)
+            const fallback = text(detail.ImageKey) ?? text(product.ImageKey);
+            if (fallback)
+                keys.push(fallback);
+            const result = [];
+            for (const key of [...new Set(keys)]) {
+                const asset = Object.entries(assets).find(([cdnUrl]) => cdnUrl.includes(`/${key}/`));
+                if (!asset)
+                    continue;
+                const path = text(asset[1]);
+                if (!path)
+                    continue;
+                const imageUrl = new URL(path, record.origin).toString();
+                if (!result.includes(imageUrl))
+                    result.push(imageUrl);
+                if (result.length >= 20)
                     break;
             }
-            return imageUrls;
+            return result;
         };
         let accepted = 0;
         const errors = [];
         await this.withIntegrationContext(record, async () => {
-            for (const source of sourceProducts) {
+            for (const row of rows) {
                 try {
-                    const productKey = getText(source.ProductKey);
-                    const productId = getText(source.ProductId);
-                    const externalProductId = productKey ?? productId;
+                    const externalProductId = text(row.ProductKey) ?? text(row.ProductId);
                     if (!externalProductId) {
                         throw new Error('Missing product identifier');
                     }
-                    const detail = findDetail(externalProductId);
-                    const slug = getText(source.ProductSlug) ?? getText(detail.Slug);
-                    if (!slug) {
-                        throw new Error(`Missing product slug: ${externalProductId}`);
-                    }
-                    const descriptionFields = [
+                    const detailValue = Object.entries(details).find(([key]) => key.toLowerCase() === externalProductId.toLowerCase())?.[1];
+                    const detail = detailValue && typeof detailValue === 'object'
+                        ? detailValue
+                        : {};
+                    const slug = text(row.ProductSlug) ?? text(detail.Slug);
+                    if (!slug)
+                        throw new Error(`Missing slug for ${externalProductId}`);
+                    const fields = [
                         ['Description', detail.ProductDescription],
                         ['Composition', detail.Composition],
                         ['Features', detail.Features],
@@ -274,16 +418,17 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
                         ['Contraindications', detail.Contraindications],
                         ['Terms and conditions', detail.TandC],
                     ];
-                    const description = descriptionFields
+                    const description = fields
                         .map(([label, value]) => {
-                        const text = getText(value);
-                        return text ? `${label}:\n${text}` : null;
+                        const valueText = text(value);
+                        return valueText ? `${label}:\n${valueText}` : null;
                     })
                         .filter((value) => Boolean(value))
                         .join('\n\n')
                         .slice(0, 100000);
-                    const stock = getNumber(detail.Stock) ?? getNumber(source.Stock);
-                    const stockStatus = (getText(detail.StockStatus) ?? getText(source.StockStatus) ?? '').toLowerCase().replace(/[\s_-]/g, '');
+                    const rawStock = number(detail.Stock) ?? number(row.Stock);
+                    const stock = rawStock === null ? null : Math.trunc(rawStock);
+                    const stockStatus = (text(detail.StockStatus) ?? text(row.StockStatus) ?? '').toLowerCase().replace(/[\s_-]/g, '');
                     let availability = 'unknown';
                     if (stockStatus === 'instock' && (stock === null || stock > 0)) {
                         availability = 'in_stock';
@@ -297,38 +442,44 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
                     else if (stockStatus.includes('discontinued')) {
                         availability = 'discontinued';
                     }
-                    const active = detail.IsActive !== false && source.IsActive !== false;
-                    const attributes = {
-                        productId,
-                        productCode: getText(detail.ProductCode),
-                        hsnCode: getText(detail.HSNCode),
-                        schedule: getText(detail.Schedule),
-                        unitType: getText(detail.UnitType) ?? getText(source.UnitType),
-                        weight: getNumber(detail.Weight) ?? getNumber(source.Weight),
-                        gstRate: getNumber(detail.GSTRate),
-                        discountPercent: getNumber(detail.DiscountPct) ?? getNumber(source.DiscountPct),
-                        averageRating: getNumber(detail.AverageRating) ?? getNumber(source.AverageRating),
-                        totalRatings: getNumber(detail.TotalRatings) ?? getNumber(source.TotalRatings),
+                    const attributes = {};
+                    const attributeValues = {
+                        productId: text(row.ProductId),
+                        productCode: text(detail.ProductCode),
+                        hsnCode: text(detail.HSNCode),
+                        schedule: text(detail.Schedule),
+                        unitType: text(detail.UnitType) ?? text(row.UnitType),
+                        weight: number(detail.Weight) ?? number(row.Weight),
+                        gstRate: number(detail.GSTRate),
+                        discountPercent: number(detail.DiscountPct) ?? number(row.DiscountPct),
+                        averageRating: number(detail.AverageRating) ?? number(row.AverageRating),
+                        totalRatings: number(detail.TotalRatings) ?? number(row.TotalRatings),
                     };
-                    const productInput = {
+                    for (const [key, value] of Object.entries(attributeValues)) {
+                        if (value !== undefined)
+                            attributes[key] = value;
+                    }
+                    const input = {
                         externalProductId,
-                        name: getText(detail.ProductName) ?? getText(source.ProductName) ?? 'Unnamed product',
+                        name: text(detail.ProductName) ?? text(row.ProductName) ?? 'Unnamed product',
                         description: description || null,
-                        sku: getText(detail.ProductCode),
-                        brand: getText(detail.ManufacturerName) ?? getText(source.ManufacturerName),
-                        category: getText(source.CatName) ?? getText(detail.CatName),
-                        price: getNumber(detail.MRP) ?? getNumber(source.MRP),
-                        salePrice: getNumber(detail.SalePrice) ?? getNumber(source.SalePrice),
-                        currency: getText(detail.CurrencyCode) ?? getText(source.CurrencyCode) ?? 'INR',
+                        sku: text(detail.ProductCode),
+                        brand: text(detail.ManufacturerName) ?? text(row.ManufacturerName),
+                        category: text(row.CatName) ?? text(detail.CatName),
+                        price: number(detail.MRP) ?? number(row.MRP),
+                        salePrice: number(detail.SalePrice) ?? number(row.SalePrice),
+                        currency: text(detail.CurrencyCode) ?? text(row.CurrencyCode) ?? 'INR',
                         stock,
                         availability,
-                        images: getImages(source, detail),
+                        images: acceptedImages(row, detail),
                         productUrl: new URL(`/product/${encodeURIComponent(slug)}`, record.origin).toString(),
                         attributes,
                         updatedAt: null,
-                        status: active ? 'active' : 'inactive',
+                        status: detail.IsActive === false || row.IsActive === false
+                            ? 'inactive'
+                            : 'active',
                     };
-                    const validated = (0, website_integration_dto_1.parseWebsiteProduct)(productInput, record.origin);
+                    const validated = (0, website_integration_dto_1.parseWebsiteProduct)(input, record.origin);
                     await this.saveProduct(record, validated);
                     accepted += 1;
                 }
@@ -336,7 +487,7 @@ let WebsiteIntegrationService = WebsiteIntegrationService_1 = class WebsiteInteg
                     const message = error instanceof Error
                         ? error.message.slice(0, 150)
                         : 'Unknown product import error';
-                    errors.push(`Product import skipped: ${message}`);
+                    errors.push(`Product skipped: ${message}`);
                     if (errors.length >= 50)
                         break;
                 }
