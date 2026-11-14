@@ -1,6 +1,6 @@
 export function createMerchantNavigation({
   merchantOrigin,
-  openWindow = (...args) => window.open(...args),
+  navigate = url => window.location.assign(url),
   onFallback = () => {},
   onError = message => console.error("[McZEN:navigation]", message),
 }) {
@@ -29,12 +29,11 @@ export function createMerchantNavigation({
       if (completed.has(action.id)) return false;
       completed.add(action.id);
       const label = action.type === "OPEN_CHECKOUT" ? "Open Checkout" : "Open Cart";
-      // Keep a usable link even when a browser returns null for a noopener window.
       onFallback({ url: url.href, label, id: action.id });
       try {
-        openWindow(url.href, "_blank", "noopener,noreferrer");
+        navigate(url.href);
       } catch {
-        onError("Automatic navigation was blocked. Use the merchant navigation link.");
+        onError("Automatic navigation failed. Use the merchant navigation link.");
       }
       return true;
     },

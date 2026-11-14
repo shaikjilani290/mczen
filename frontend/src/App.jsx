@@ -625,7 +625,7 @@ export default function App() {
 
         <div className="dock">
           {merchantNavigation && (
-            <a href={merchantNavigation.url} target="_blank" rel="noopener noreferrer">
+            <a href={merchantNavigation.url}>
               {merchantNavigation.label}
             </a>
           )}

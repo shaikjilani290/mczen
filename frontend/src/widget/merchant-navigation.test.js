@@ -12,12 +12,12 @@ const response = (type = "OPEN_CHECKOUT", operation = "add_to_cart") => ({
 test("verified addition opens checkout once across repeated text and voice responses", () => {
   const opened = [], links = [], errors = [];
   const handler = createMerchantNavigation({
-    merchantOrigin: origin, openWindow: (...args) => opened.push(args),
+    merchantOrigin: origin, navigate: url => opened.push(url),
     onFallback: link => links.push(link), onError: error => errors.push(error),
   });
   assert.equal(handler.handle(response()), true);
   assert.equal(handler.handle(response()), false);
-  assert.deepEqual(opened, [[`${origin}/checkout`, "_blank", "noopener,noreferrer"]]);
+  assert.deepEqual(opened, [`${origin}/checkout`]);
   assert.equal(links[0].label, "Open Checkout");
   assert.deepEqual(errors, []);
 });
@@ -25,7 +25,7 @@ test("verified addition opens checkout once across repeated text and voice respo
 test("verified view cart opens cart, and cart-only add uses cart", () => {
   for (const operation of ["get_cart", "open_cart", "add_to_cart"]) {
     const opened = [];
-    const handler = createMerchantNavigation({ merchantOrigin: origin, openWindow: url => opened.push(url) });
+    const handler = createMerchantNavigation({ merchantOrigin: origin, navigate: url => opened.push(url) });
     assert.equal(handler.handle(response("OPEN_CART", operation)), true);
     assert.deepEqual(opened, [`${origin}/cart`]);
   }
@@ -33,7 +33,7 @@ test("verified view cart opens cart, and cart-only add uses cart", () => {
 
 test("older repeated navigation events remain deduplicated for the widget lifetime", () => {
   let opened = 0;
-  const handler = createMerchantNavigation({ merchantOrigin: origin, openWindow: () => opened++ });
+  const handler = createMerchantNavigation({ merchantOrigin: origin, navigate: () => opened++ });
   for (let index = 0; index < 110; index++) {
     const item = response();
     item.navigationAction.id = index.toString(16).padStart(64, "0");
@@ -45,15 +45,16 @@ test("older repeated navigation events remain deduplicated for the widget lifeti
   assert.equal(opened, 110);
 });
 
-test("popup blocking leaves a usable fallback checkout link", () => {
-  for (const openWindow of [() => null, () => { throw new Error("Blocked"); }]) {
+test("navigation failure leaves a usable fallback checkout link", () => {
+  for (const navigate of [() => { throw new Error("Blocked"); }]) {
     const links = [], errors = [];
     const handler = createMerchantNavigation({
-      merchantOrigin: origin, openWindow, onFallback: link => links.push(link), onError: error => errors.push(error),
+      merchantOrigin: origin, navigate, onFallback: link => links.push(link), onError: error => errors.push(error),
     });
     assert.equal(handler.handle(response()), true);
     assert.equal(links[0].url, `${origin}/checkout`);
     assert.equal(links[0].label, "Open Checkout");
+    assert.deepEqual(errors, ["Automatic navigation failed. Use the merchant navigation link."]);
   }
 });
 
@@ -72,7 +73,7 @@ test("failed, unverified, cross-origin, unsafe and non-navigation operations nev
   ];
   for (const item of invalid) {
     const opened = [];
-    const handler = createMerchantNavigation({ merchantOrigin: origin, openWindow: url => opened.push(url), onError: () => {} });
+    const handler = createMerchantNavigation({ merchantOrigin: origin, navigate: url => opened.push(url), onError: () => {} });
     assert.equal(handler.handle(item), false);
     assert.deepEqual(opened, []);
   }
@@ -80,7 +81,28 @@ test("failed, unverified, cross-origin, unsafe and non-navigation operations nev
 
 test("dashboard without a connected permitted merchant origin fails closed", () => {
   const opened = [];
-  const handler = createMerchantNavigation({ openWindow: url => opened.push(url), onError: () => {} });
+  const handler = createMerchantNavigation({ navigate: url => opened.push(url), onError: () => {} });
   assert.equal(handler.handle(response()), false);
   assert.deepEqual(opened, []);
+});
+
+test("default navigation uses the current tab after an asynchronous response, never a popup", async t => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const destinations = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      location: { assign: url => destinations.push(url) },
+      open: () => assert.fail("Checkout must not use a popup"),
+    },
+  });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "window", original);
+    else delete globalThis.window;
+  });
+  const handler = createMerchantNavigation({ merchantOrigin: origin });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(handler.handle(response()), true);
+  assert.equal(handler.handle(response()), false);
+  assert.deepEqual(destinations, [`${origin}/checkout`]);
 });
