@@ -373,6 +373,35 @@ test("website SDK uses the public integration key, scoped session, and page-view
   }
 });
 
+test("cart and checkout chat never automatically transmit page URLs, titles or referrers", async t => {
+  const previousLocation = globalThis.location;
+  const previousDocument = globalThis.document;
+  t.after(() => {
+    if (previousLocation === undefined) delete globalThis.location;
+    else globalThis.location = previousLocation;
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  });
+  let requests = 0;
+  const client = createWidgetClient({
+    apiBase: "https://mczen.example", publicKey: "mzp_test", integration: true,
+    productContext: () => null,
+    fetchImpl: async () => {
+      requests++;
+      return reply(200, { sessionToken: "session", config: {} });
+    },
+  });
+  try {
+    await client.start();
+    globalThis.document = { title: "Private checkout", referrer: "https://shop.example/login?token=private" };
+    for (const path of ["/checkout", "/checkout/", "/cart", "/cart/"]) {
+      globalThis.location = { href: `https://shop.example${path}?email=private#payment` };
+      await client.trackPageView();
+    }
+    assert.equal(requests, 1, "only the session connection should be sent");
+  } finally { client.destroy(); }
+});
+
 test("message responses expose structured product cards supplied by the agent", async () => {
   const { client } = harness([
     reply(200, { sessionToken: "t1", config: {} }),

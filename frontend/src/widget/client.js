@@ -235,6 +235,7 @@ export function createWidgetClient({
 
   async function trackPageView() {
     if (!integration || !token) return;
+    if (/^\/(?:cart|checkout)\/?$/.test(new URL(location.href).pathname)) return;
     let response;
     try {
       response = await fetchImpl(`${apiBase}/api/website-ingestion/page-view`, {
