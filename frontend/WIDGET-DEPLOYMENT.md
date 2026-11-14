@@ -20,6 +20,15 @@ The widget stays unavailable until enabled and the page origin is allow-listed. 
 
 ### Verified cart and checkout navigation
 
+For Telugu or Hindi, select the language before starting voice. The same selection
+is used for Whisper, grounded response generation and TTS. Product questions accept
+native script and common romanized requests such as `ZENAGE gurinchi chepandi`
+and `ZENAGE ke bare mein bataiye`. Exact catalogue identity is still required:
+a misheard product name prompts clarification rather than selecting another item.
+The model must itself support fluent Telugu/Hindi; prompt and script checks do not
+certify fluency or pronunciation. Newly added languages need matching supported
+STT/model/TTS capabilities; adding an admin language row alone is insufficient.
+
 Pass the existing merchant-owned `cartAdapter` to `McZEN.init()`. Its `execute`
 method must support `get_cart` as well as mutations and return the actual cart
 snapshot. McZEN reads the cart before additions/removals, performs the mutation,
@@ -47,11 +56,18 @@ Telugu confirmations use the selected/detected language, without asking the LLM
 to claim transaction success.
 
 The SDK checks the destination against the current merchant origin and deduplicates
-operation IDs. It attempts a new tab without interrupting speech, and always
-provides an **Open Checkout** / **Open Cart** fallback link in both chat and voice
-views because popup blockers and `noopener` return values are browser-dependent.
+operation IDs. It navigates the current tab with `window.location.assign`, avoiding
+popup blockers for asynchronous text and voice responses. It also provides an
+**Open Checkout** / **Open Cart** fallback link in both chat and voice views if
+navigation fails. A full-page navigation ends the current widget/voice session
+and may interrupt the spoken confirmation; it does not resume the microphone.
 Cookies/cart storage remain on the merchant origin; no session token is put in a URL.
 Opening a cart or checkout never submits an order or payment.
+The merchant must mount the widget on cart and checkout routes as well as product
+pages. The SDK suppresses automatic page-view tracking on `/cart` and `/checkout`
+(including trailing-slash variants); it does not collect checkout form context.
+After a full-page navigation the launcher is available, but voice must be started
+explicitly again.
 
 The standalone React assistant uses the same navigation handler. It fails closed
 unless `VITE_MERCHANT_ORIGIN` is explicitly configured at build time. That setting
@@ -307,6 +323,8 @@ quantity write. Replay must not subtract again.
 
 `execute(action)` receives an idempotency `id`, `operation`, and, for mutations,
 the actual imported `productId` with optional `variantId` and `quantity`.
+Backend verification fields such as `expectedQuantity` stay server-side and are
+not part of this adapter contract; strict adapters may reject unknown fields.
 It must validate the catalogue/availability, preserve other cart contents,
 commit to the real cart, and return persisted read-back:
 

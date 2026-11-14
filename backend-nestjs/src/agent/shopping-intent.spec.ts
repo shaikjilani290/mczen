@@ -28,6 +28,12 @@ describe('shopping intent classification', () => {
     ['ZENAGE కార్ట్‌లో జోడించవద్దు.', 'GENERAL_CONVERSATION'],
     ['मेरा कार्ट खोलें।', 'VIEW_CART'],
     ['నా కార్ట్ చూపించండి.', 'VIEW_CART'],
+    ['ZENAGE గురించి చెప్పండి', 'PRODUCT_DETAILS'],
+    ['zenage gurinchi chepandi', 'PRODUCT_DETAILS'],
+    ['ZENAGE के बारे में बताइए', 'PRODUCT_DETAILS'],
+    ['ZENAGE ke bare mein bataiye', 'PRODUCT_DETAILS'],
+    ['దాని పదార్థాలు ఏమిటి?', 'PRODUCT_FOLLOW_UP'],
+    ['इसकी सामग्री बताइए', 'PRODUCT_FOLLOW_UP'],
   ])('routes %s as %s', (question, expected) => {
     expect(shoppingIntent(question)).toBe(expected);
   });
@@ -37,5 +43,9 @@ describe('shopping intent classification', () => {
     expect(productQuery('Tell me about AURA STRESS FREE COFFEE.')).toBe('AURA STRESS FREE COFFEE');
     expect(productQuery('ZENAGE मेरे कार्ट में जोड़ दें।')).toContain('ZENAGE');
     expect(productQuery('ZENAGE నా కార్ట్‌లో జోడించండి.')).toBe('ZENAGE');
+    expect(productQuery('ZENAGE గురించి చెప్పండి')).toBe('ZENAGE');
+    expect(productQuery('zenage gurinchi chepandi')).toBe('zenage');
+    expect(productQuery('ZENAGE के बारे में बताइए।')).toBe('ZENAGE');
+    expect(productQuery('ZENAGE ke bare mein bataiye')).toBe('ZENAGE');
   });
 });

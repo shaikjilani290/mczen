@@ -146,6 +146,7 @@ export class ConfiguredSttAdapter implements SpeechToTextPort {
       if (!isRemoteResult(payload)) throw new VoiceProviderError('VOICE_PROVIDER_INVALID');
       this.logger.log({
         event: 'voice_remote_stt_timing', requestId: request.requestId,
+        requestedLanguage: request.language, detectedLanguage: payload.language,
         provider: 'remote', durationMs: performance.now() - started,
         processingMs: payload.processing_time * 1000, audioMs: payload.audio_duration * 1000,
         ...(typeof payload.model === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(payload.model) ? { activeModel: payload.model } : {}),

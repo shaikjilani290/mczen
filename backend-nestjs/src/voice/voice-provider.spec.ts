@@ -1,10 +1,38 @@
 import { FasterWhisperAdapter } from './stt/faster-whisper.adapter';
 import { SileroVadAdapter } from './vad/silero-vad.adapter';
 import { PiperAdapter } from './tts/piper.adapter';
+import { DhvaaniAdapter } from './tts/dhvaani.adapter';
 import { fetchWithTimeout, Semaphore, VoiceProviderError, readLoopbackUrl } from './voice-provider.util';
 
 describe('voice provider adapters', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    ['te', 'ZENAGE గురించి అందుబాటులో ఉన్న వివరాలు ఇవి.'],
+    ['hi', 'ZENAGE के बारे में उपलब्ध जानकारी यह है।'],
+  ] as const)('sends exact %s text and language to Dhvaani without translation (HTTP mocked)', async (language, text) => {
+    const wav = Buffer.alloc(44 + 480);
+    wav.write('RIFF', 0);
+    wav.writeUInt32LE(wav.length - 8, 4);
+    wav.write('WAVEfmt ', 8);
+    wav.writeUInt32LE(16, 16);
+    wav.writeUInt16LE(1, 20);
+    wav.writeUInt16LE(1, 22);
+    wav.writeUInt32LE(24000, 24);
+    wav.writeUInt32LE(48000, 28);
+    wav.writeUInt16LE(2, 32);
+    wav.writeUInt16LE(16, 34);
+    wav.write('data', 36);
+    wav.writeUInt32LE(480, 40);
+    const fetch = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(new Uint8Array(wav), { headers: { 'Content-Type': 'audio/wav' } }));
+    const chunks: Buffer[] = [];
+    for await (const chunk of new DhvaaniAdapter().synthesize({
+      text, language, voice: 'my_voice', rate: 1, signal: new AbortController().signal,
+    })) chunks.push(chunk.data);
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ text, voice_id: 'my_voice', language });
+    expect(Buffer.concat(chunks).length).toBe(320);
+  });
 
   it('limits provider URLs to loopback services', () => {
     expect(readLoopbackUrl('VOICE_TEST_URL', 'http://127.0.0.1:8001').hostname).toBe('127.0.0.1');

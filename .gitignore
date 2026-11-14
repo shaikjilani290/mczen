@@ -1,5 +1,7 @@
 node_modules/
 .env
+frontend/dist/
+backend-nestjs/dist/
 backend-nestjs/storage/
 backend-nestjs/.local-voice/
 **/__pycache__/

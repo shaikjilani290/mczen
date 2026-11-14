@@ -1613,7 +1613,7 @@ function normalizeTranscript(value: string, maxLength: number): string {
 function splitSentences(value: string): string[] {
   const normalized = value.replace(/\s+/g, ' ').trim();
   if (!normalized) return [];
-  return normalized.split(/(?<=[.!?。！？])\s+/u).flatMap((sentence) => {
+  return normalized.split(/(?<=[.!?。！？।॥])\s+/u).flatMap((sentence) => {
     const parts: string[] = [];
     while (sentence.length > 500) {
       const space = sentence.lastIndexOf(' ', 500);

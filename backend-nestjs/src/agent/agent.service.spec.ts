@@ -366,6 +366,55 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     return JSON.parse(String(fetchMock.mock.calls[index][1]?.body)) as SentRequest;
   }
 
+  it.each([
+    ['te', 'ZENAGE గురించి చెప్పండి', 'ZENAGE చర్మ ఆరోగ్యానికి మద్దతు ఇవ్వడానికి రూపొందించిన పోషక ఉత్పత్తి.'],
+    ['te', 'ZENAGE gurinchi chepandi', 'ZENAGE చర్మ ఆరోగ్యానికి మద్దతు ఇవ్వడానికి రూపొందించిన పోషక ఉత్పత్తి.'],
+    ['hi', 'ZENAGE के बारे में बताइए', 'ZENAGE त्वचा के स्वास्थ्य को सहारा देने के लिए बनाया गया एक पोषण उत्पाद है।'],
+    ['hi', 'ZENAGE ke bare mein bataiye', 'ZENAGE त्वचा के स्वास्थ्य को सहारा देने के लिए बनाया गया एक पोषण उत्पाद है।'],
+  ] as const)('grounds %s product replies for native/romanized request %s (model mocked)', async (language, question, answer) => {
+    const product = {
+      externalProductId: 'zenage', name: 'ZENAGE', price: null, salePrice: null, currency: 'INR',
+      images: [], productUrl: 'https://merchant.example/zenage',
+      description: 'A nutritional formulation intended to support skin health.',
+    };
+    const repository = Object.assign(Object.create(WebsiteIntegrationRepository.prototype) as WebsiteIntegrationRepository, {
+      productVocabulary: jest.fn().mockResolvedValue([{ externalProductId: 'zenage', name: 'ZENAGE' }]),
+    });
+    const merchant = new MerchantCartService(new MemorySharedState(), repository);
+    registry.unregister('get_product_details');
+    registry.register(testTool({
+      name: 'get_product_details', requiredPermissions: ['products:read'],
+      inputSchema: { type: 'object', required: ['externalProductId'],
+        properties: { externalProductId: { type: 'string' } }, additionalProperties: false },
+      handler: async () => ({ product }),
+    }));
+    service = new AgentService(registry, executor, {
+      values: readAgentRuntimeConfig({ LLM_PROVIDER: 'openai-compatible', AGENT_RESPONSE_MODE: 'conversational' }),
+    } as AgentRuntimeConfigService, new ToolPermissionService(), undefined, merchant, new ProductIdentityService(repository));
+    const context: AgentExecutionContext = {
+      ...contextFor(), assistantId: newUuidv7(), channel: 'widget', language,
+      merchant: { integrationId: newUuidv7(), sessionId: 'language-test', origin: 'https://merchant.example' },
+    };
+    for (const modality of ['text', 'voice'] as const) {
+      queueCompatibleAssistant(answer);
+      const result = await service.ask(question, { ...context, modality });
+      expect(result.success).toBe(true);
+      expect(result.answer).toContain(answer);
+      expect(result.answer).not.toContain('These are formulation objectives');
+      expect(result.products?.[0].externalProductId).toBe('zenage');
+      const request = sentRequest(fetchMock.mock.calls.length - 1);
+      expect(request.messages[0].content).toContain(language === 'te' ? 'Telugu script' : 'Devanagari script');
+      expect(request.messages.at(-1)?.content).toContain(language === 'te' ? 'Telugu script' : 'Devanagari script');
+    }
+    queueCompatibleAssistant('ZENAGE is a nutrition product.');
+    const onText = jest.fn();
+    const rejected = await service.ask(question, context, { onText });
+    expect(rejected.success).toBe(false);
+    expect(rejected.answer).toMatch(language === 'te' ? /\p{Script=Telugu}/u : /\p{Script=Devanagari}/u);
+    expect(onText).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.objectContaining({ event: 'assistant_response_language_rejected' }));
+  });
+
   it.each(['ollama', 'openai-compatible'] as const)(
     'restores the seven-question conversational flow and selected-product follow-ups with %s',
     async provider => {

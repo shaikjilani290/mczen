@@ -280,6 +280,17 @@ export class AgentService {
     const configuredModel = this.config.values.llmProvider === 'openai-compatible'
       ? this.config.values.llmModel
       : this.config.values.ollamaModel;
+    const responseLanguage = context.language === 'te' ? 'te' : context.language === 'hi' ? 'hi' : 'en';
+    const languageInstruction = responseLanguage === 'te'
+      ? 'Reply entirely in natural, simple Telugu using Telugu script, even when the question is romanized Telugu or source records are English. Keep exact catalogue product names such as ZENAGE unchanged. Translate explanations and safety qualifications, not product identities. Do not mix in Hindi or English sentences.'
+      : responseLanguage === 'hi'
+        ? 'Reply entirely in natural, simple Hindi using Devanagari script, even when the question is romanized Hindi or source records are English. Keep exact catalogue product names such as ZENAGE unchanged. Translate explanations and safety qualifications, not product identities. Do not mix in Telugu or English sentences.'
+        : 'Reply in natural English. Keep exact catalogue product names unchanged.';
+    const clinicalQualification = responseLanguage === 'te'
+      ? 'ఇవి ఉత్పత్తి తయారీ లక్ష్యాలు మాత్రమే; స్వతంత్రంగా నిర్ధారించిన వైద్య ఫలితాలు కావు.'
+      : responseLanguage === 'hi'
+        ? 'ये फ़ॉर्मूले के उद्देश्य हैं, स्वतंत्र रूप से प्रमाणित चिकित्सीय परिणाम नहीं।'
+        : 'These are formulation objectives, not independently verified clinical outcomes.';
     const respond = async (success: boolean, answer: string, model = configuredModel, cartOperation?: VerifiedCartOperation): Promise<AgentResponse> => {
       if (/(?:\b(?:coverage|historical)\s*[:=]|\bsource:\s*public[\\/]|public[\\/]data[\\/]|recorded storefront snapshot|recorded product detail)/i.test(answer)) {
         this.logger.warn({ event: 'assistant_metadata_rejected', requestId: context.requestId, engine: model });
@@ -363,7 +374,7 @@ export class AgentService {
         matchMode: 'exact-normalized', clarificationRequired: named.length !== 1 });
       return { result, named };
     };
-    const detailTopic = intent === 'PRODUCT_FOLLOW_UP' ||
+    const detailTopic = (intent === 'PRODUCT_DETAILS' && !/\bprice\b/i.test(question)) || intent === 'PRODUCT_FOLLOW_UP' ||
       /\b(details?|explanations?|descriptions?|explain(?:s|ing)?|describe|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?)\b|side effects|what(?:'s| is) inside|how (?:do i |should i |to )use/i.test(question);
     const fullProductExplanation = detailTopic && /\b(full|complete|detailed|everything|all)\b/i.test(question);
     const priceOnly = /\bprice\b/i.test(question) && !detailTopic && !/\b(about|details|explain|describe)\b/i.test(question);
@@ -406,7 +417,11 @@ export class AgentService {
         }
         if (matches.length !== 1) {
           await this.merchantCart.updateShoppingContext(context, { pendingClarification: name });
-          return respond(true, `Which product do you mean? I could not uniquely match "${name}" in this catalogue.`, 'verified-catalogue');
+          return respond(true, responseLanguage === 'te'
+            ? `మీరు ఏ ఉత్పత్తి గురించి అడుగుతున్నారు? "${name}" పేరుతో ఒకే ఉత్పత్తిని గుర్తించలేకపోయాను. దయచేసి ఉత్పత్తి పేరును స్పష్టంగా చెప్పండి లేదా టైప్ చేయండి.`
+            : responseLanguage === 'hi'
+              ? `आप किस उत्पाद के बारे में पूछ रहे हैं? "${name}" नाम से एक उत्पाद की पहचान नहीं हो सकी। कृपया उत्पाद का सही नाम स्पष्ट रूप से बोलें या टाइप करें।`
+              : `Which product do you mean? I could not uniquely match "${name}" in this catalogue.`, 'verified-catalogue');
         }
         if (context.modality === 'voice' && normalizeProductName(matches[0].name) === 'edge' &&
             normalizeProductName(priorShopping?.currentProductName ?? '') === 'zenage') {
@@ -732,7 +747,7 @@ export class AgentService {
     }
 
     // Keep a small recent window alongside the selected record to bound the model context.
-    const productAnswerTask = /\b(?:ingredients?|composition)\b/i.test(question)
+    const productAnswerTask = /\b(?:ingredients?|composition)\b|పదార్థాలు|సామగ్రి|सामग्री|घटक/iu.test(question)
       ? 'List the ingredients supplied in the selected product record in at most 160 words. Do not repeat the product introduction or formulation-objectives list. Do not infer ingredients or amounts.'
       : /\bhow\b.*\b(?:support|help|work)\b/i.test(question)
         ? 'In at most 120 words explain how the selected product is intended to support the requested goal, using only its documented formulation objectives and nutritional roles. Do not repeat the full product overview or imply clinical proof.'
@@ -756,7 +771,7 @@ export class AgentService {
     const messages: OllamaMessage[] = [
       {
         role: 'system',
-        content: selectedProductPrompt ?? [
+        content: (selectedProductPrompt ?? [
           'You are McZEN, an intelligent AI application assistant.',
           'Answer application-specific questions using the verified knowledge context provided.',
           'Never invent prices, benefits, product details, earning plans, or policies.',
@@ -787,7 +802,7 @@ export class AgentService {
           knowledgeContext
             ? `VERIFIED APPLICATION KNOWLEDGE:\n${knowledgeContext}`
             : 'No application-specific knowledge was retrieved for this question.',
-        ].join('\n\n'),
+        ].join('\n\n')) + `\n\n${languageInstruction}`,
       },
       ...(selectedProductPrompt ? history.slice(-4) : history).map((message) => ({
         role: message.role,
@@ -1021,7 +1036,7 @@ export class AgentService {
               : initialLookup?.name === 'search_products' && Object.keys(initialLookup.input).length === 0
                 ? ' This is a catalogue overview: introduce only the supplied product names and categories, then ask what the customer would like to explore. Do not describe or infer product purposes, benefits, ingredients, prices, stock or sales rankings.'
                 : '') +
-            `\nThe current customer question to answer is: ${JSON.stringify(question)}`,
+            `\n${languageInstruction}\nThe current customer question to answer is: ${JSON.stringify(question)}`,
         });
       }
 
@@ -1031,7 +1046,7 @@ export class AgentService {
         assistantMessage = await this.chatWithProvider(
           messages,
           finalAnswerOnly ? [] : tools,
-          { ...options, onText: finalAnswerOnly && !conversational && !generateProductExplanation && options.onText ? text => {
+          { ...options, onText: finalAnswerOnly && responseLanguage === 'en' && !conversational && !generateProductExplanation && options.onText ? text => {
             if (wrongProductAnswer(text)) {
               this.logger.warn({ event: 'product_identity_stream_rejected', requestId: context.requestId,
                 selectedProductId: pinnedProduct?.externalProductId });
@@ -1058,14 +1073,25 @@ export class AgentService {
       // 5. Return the final answer when no more tools are requested.
       if (requestedCalls.length === 0) {
         let answer = assistantMessage.content.trim();
+        const languageScript = responseLanguage === 'te' ? /\p{Script=Telugu}/u
+          : responseLanguage === 'hi' ? /\p{Script=Devanagari}/u : undefined;
+        if (answer && languageScript && !languageScript.test(answer)) {
+          this.logger.warn({ event: 'assistant_response_language_rejected', requestId: context.requestId,
+            requestedLanguage: responseLanguage, answerChars: answer.length });
+          return respond(false, responseLanguage === 'te'
+            ? 'క్షమించండి, తెలుగులో సరైన సమాధానం రూపొందించలేకపోయాను. దయచేసి మళ్లీ ప్రయత్నించండి.'
+            : 'क्षमा करें, हिंदी में सही उत्तर तैयार नहीं हो सका। कृपया फिर से प्रयास करें।');
+        }
         if (generateProductExplanation &&
             /(?:\b(?:coverage|historical)\s*[:=]|\bsource:\s*public[\\/]|public[\\/]data[\\/]|recorded storefront snapshot|recorded product detail)/i.test(answer)) {
           this.logger.warn({ event: 'product_explanation_metadata_rejected', requestId: context.requestId });
           return respond(false, RUNTIME_ERRORS.OLLAMA_INVALID_RESPONSE);
         }
         if (answer && generateProductExplanation && hasFormulationClaims &&
-            !/\bnot independently verified clinical (?:outcomes|evidence)\b/i.test(answer)) {
-          answer += '\n\nThese are formulation objectives, not independently verified clinical outcomes.';
+            !(responseLanguage === 'en'
+              ? /\bnot independently verified clinical (?:outcomes|evidence)\b/i.test(answer)
+              : answer.includes(clinicalQualification))) {
+          answer += `\n\n${clinicalQualification}`;
         }
         if (!answer) this.traceFailure(context.requestId, 'OLLAMA_EMPTY_RESPONSE');
         return respond(Boolean(answer), answer || RUNTIME_ERRORS.OLLAMA_EMPTY_RESPONSE);

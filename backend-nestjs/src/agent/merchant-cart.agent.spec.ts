@@ -104,6 +104,18 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
     expect(result.answer).toBe('Merchant rejected addition.');
   });
 
+  it.each([
+    ['te', 'జెనేస్ గురించి చెప్పండి'],
+    ['hi', 'जेनेस के बारे में बताइए'],
+  ] as const)('asks for an exact name in %s rather than guessing a misheard product', async (language, question) => {
+    useVocabulary([{ name: 'ZENAGE', externalProductId: productId }]);
+    const result = await service.ask(question, { ...context, language, modality: 'voice' });
+    expect(result.answer).toMatch(language === 'te' ? /దయచేసి/ : /कृपया/);
+    expect(result.navigationAction).toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it.each(['Explain ZENAGE.', 'Tell me about ZENAGE.', 'What are the ingredients in ZENAGE?',
     'Explain WEIZAP.', 'Tell me about LASS HEALTH.', 'Explain HALE.O.'])('pins exact identity for %s (mocked STT input)', async question => {
     const name = /ZENAGE/.test(question) ? 'ZENAGE' : /WEIZAP/.test(question) ? 'WEIZAP' :

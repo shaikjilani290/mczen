@@ -73,6 +73,7 @@ describe('VoiceSessionManager', () => {
   let agentInvoke: jest.Mock;
   let sttTranscribe: jest.Mock;
   let conversationCreate: jest.Mock;
+  let auth: VoiceAuthService;
 
   beforeEach(() => {
     store = new MemorySharedState();
@@ -155,7 +156,7 @@ describe('VoiceSessionManager', () => {
       prepareAgentTurn: jest.fn().mockResolvedValue({ assistantId }),
     };
     conversations = conversationsService as unknown as jest.Mocked<ConversationsService>;
-    const auth = {
+    auth = {
       resolveSettings: jest.fn().mockResolvedValue({
         settings,
         allowedLanguages: ['en', 'hi'],
@@ -188,6 +189,36 @@ describe('VoiceSessionManager', () => {
     }));
     return String(started?.sessionId);
   }
+
+  it.each([
+    ['te', 'ZENAGE గురించి చెప్పండి', 'ZENAGE గురించి అందుబాటులో ఉన్న ఉత్పత్తి వివరాలు ఇవి.'],
+    ['hi', 'ZENAGE के बारे में बताइए', 'ZENAGE के बारे में उपलब्ध उत्पाद जानकारी यह है। ये उत्पाद के बताए गए उद्देश्य हैं।'],
+  ] as const)('preserves selected %s through STT, agent, response and spoken text (providers mocked)', async (language, transcript, answer) => {
+    jest.spyOn(auth, 'resolveSettings').mockResolvedValue({
+      settings: { ...settings, ttsVoice: 'my_voice' },
+      allowedLanguages: ['en', 'hi', 'te'], ttsLanguages: ['en', 'hi', 'te'], defaultLanguage: 'en',
+    });
+    jest.spyOn(auth, 'resolveLanguageVoice').mockResolvedValue({ enabled: true, voice: 'my_voice', rate: 1 });
+    tts.supportsVoice.mockReturnValue(true);
+    tts.voices.mockImplementation(code => [{ id: 'my_voice', label: 'My Voice', gender: 'male', language: code }]);
+    sttTranscribe.mockResolvedValue({
+      text: transcript, language, isFinal: true, confidence: 0.99,
+      recognitionQuality: { reliable: true, reason: 'accepted' },
+    });
+    agentInvoke.mockResolvedValue({ success: true, answer, model: 'test-model', toolCalls: [], sources: [] });
+    await manager.begin(socket, identity, { assistantId, language, voiceId: 'my_voice' }, 'Chrome/123');
+    for (let index = 0; index < 11; index++) {
+      manager.handleBinary(socket, frame(index, 1, 3200));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(sttTranscribe).toHaveBeenCalledWith(expect.objectContaining({ language }));
+    expect(agentInvoke).toHaveBeenCalledWith(transcript, expect.objectContaining({ language, modality: 'voice' }), expect.any(AbortSignal));
+    expect(sentEvents.find(event => event.type === 'voice.assistant.response')).toMatchObject({ data: { answer, success: true } });
+    expect(tts.synthesize.mock.calls.map(([request]) => request.text).join(' ')).toBe(answer);
+    expect(tts.synthesize).toHaveBeenCalledWith(expect.objectContaining({ language, voice: 'my_voice' }));
+    if (language === 'hi') expect(tts.synthesize).toHaveBeenCalledTimes(2);
+  });
 
   it('forwards verified navigation and synthesizes the same cart confirmation (providers mocked)', async () => {
     const answer = 'ZENAGE has been added to your cart. Opening your checkout page now.';
