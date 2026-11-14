@@ -435,15 +435,42 @@ export class AgentService {
         const reference = /\b(this|that|it|selected|first|second|third|more)\b/i.test(question);
         const genericChange = !productQuery(question).replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/gi, '').trim();
         if (!reference && !genericChange && cartIntent && intent !== 'VIEW_CART') {
-          const name = productQuery(question).replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/gi, '').trim();
-          const found = await lookupProduct(name);
-          if (!found.result.ok) return respond(false, found.result.error.message, 'verified-cart');
-          if (found.named.length === 1) productId = found.named[0].externalProductId;
-          else {
-            await this.merchantCart.updateShoppingContext(context, { pendingClarification: name });
-            return respond(true, `Which product do you mean by "${name}"? Nothing has been changed.`, 'verified-cart');
-          }
-        }
+  const name = productQuery(question)
+    .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/gi, '')
+    .trim();
+
+  // Use the exact product identity already matched from the
+  // active merchant catalogue instead of searching again.
+  if (explicitProducts.length === 1) {
+    productId = explicitProducts[0].externalProductId;
+  } else if (explicitProducts.length > 1) {
+    return respond(
+      true,
+      `I found multiple products. Which one would you like to add?`,
+      'verified-cart',
+    );
+  } else {
+    const found = await lookupProduct(name);
+
+    if (!found.result.ok) {
+      return respond(false, found.result.error.message, 'verified-cart');
+    }
+
+    if (found.named.length === 1) {
+      productId = found.named[0].externalProductId;
+    } else {
+      await this.merchantCart.updateShoppingContext(context, {
+        pendingClarification: name,
+      });
+
+      return respond(
+        true,
+        `Which product do you mean by "${name}"? Nothing has been changed.`,
+        'verified-cart',
+      );
+    }
+  }
+}
         if (referenceDetails) {
           if (!productId) return respond(true, 'Which product do you mean? Search or select a product first.', 'verified-catalogue');
           if (!priceOnly) {
