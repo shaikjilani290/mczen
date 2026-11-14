@@ -205,6 +205,28 @@ test("voice assistant responses forward structured product cards", async () => {
   await voice.stop();
 });
 
+test("voice forwards the complete verified cart response for navigation and rejects stale events", async () => {
+  const received = [];
+  const voice = createWidgetVoice({
+    client: { voiceTicket: async () => ({ ticket: "mzt_x" }), setVoiceActive() {} },
+    apiBase: "https://m.test", VoiceClientImpl: FakeVoiceClient,
+    onState: () => {}, onPartial: () => {}, onFinal: () => {}, onError: message => assert.fail(message),
+    onResponse: (answer, sources, products, response) => received.push(response),
+  });
+  await voice.start("en");
+  const active = FakeVoiceClient.instances.at(-1);
+  const data = {
+    success: true, answer: "ZENAGE has been added to your cart.",
+    cartOperation: { operation: "add_to_cart", cartVerified: true },
+    navigationAction: { id: "a".repeat(64), type: "OPEN_CHECKOUT", url: "https://shop.example/checkout" },
+  };
+  active.options.onEvent({ type: "voice.assistant.response", data });
+  assert.equal(received[0], data);
+  await voice.stop();
+  active.options.onEvent({ type: "voice.assistant.response", data });
+  assert.equal(received.length, 1);
+});
+
 test("interrupt reaches the active client; stop releases it for a fresh start", async () => {
   const { voice } = harness();
   await voice.start("en");

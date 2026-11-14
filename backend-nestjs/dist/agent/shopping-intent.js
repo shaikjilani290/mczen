@@ -3,6 +3,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.shoppingIntent = shoppingIntent;
 exports.productQuery = productQuery;
 function shoppingIntent(question) {
+    if (/(?:कार्ट|కార్ట్)/u.test(question)) {
+        if (/(?:मत|नहीं|వద్దు|చేయవద్దు)/u.test(question))
+            return 'GENERAL_CONVERSATION';
+        if (/(?:हटाओ|हटा दें|निकाल|తొలగించ)/u.test(question))
+            return 'REMOVE_FROM_CART';
+        if (/(?:जोड़|डाल|జోడించ|చేర్చ)/u.test(question))
+            return 'ADD_TO_CART';
+        if (/(?:दिखाओ|दिखाएं|खोल|చూపించ|తెరవ)/u.test(question))
+            return 'VIEW_CART';
+    }
     if (/\b(don'?t|do not|never|not now)\b/i.test(question))
         return 'GENERAL_CONVERSATION';
     if (/\b(?:can|could|may|might|should|would|will)\s+i\s+(?:buy|purchase|order)\b/i.test(question)) {
@@ -39,7 +49,8 @@ function shoppingIntent(question) {
     return 'GENERAL_CONVERSATION';
 }
 function productQuery(question) {
-    return question.replace(/\b(what|s|are|is|the|a|an|main|all|full|complete|detailed|everything|need|want|give|me|my|please|show|tell|explain(?:s|ing)?|describe|details?|explanations?|descriptions?|about|of|for|in|inside|and|more|how|do|i|can|should|to|use|take|products?|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?|side|effects|price|add|buy|remove|delete|cart|basket|also|too|one|units?|items?|quantity|update|set|change|increase|decrease)\b/gi, ' ')
+    return question.replace(/(?:मेरे|मेरी|कार्ट|में|जोड़ दीजिए|जोड़ दें|जोड़ो|जोड़ें|जोड़|डाल दें|डालो|हटाओ|हटा दें|कृपया|నాకు|నా|కార్ట్‌లో|కార్ట్లో|కార్ట్|జోడించండి|జోడించు|చేర్చండి|చేర్చు|దయచేసి|తొలగించండి)/gu, ' ')
+        .replace(/\b(what|s|are|is|the|a|an|main|all|full|complete|detailed|everything|need|want|give|me|my|please|show|tell|explain(?:s|ing)?|describe|details?|explanations?|descriptions?|about|of|for|in|inside|and|more|how|do|i|can|should|to|use|take|products?|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?|side|effects|price|add|buy|remove|delete|cart|basket|also|too|one|units?|items?|quantity|update|set|change|increase|decrease)\b/gi, ' ')
         .replace(/\b\d+(?:\.\d+)?\b/g, ' ').replace(/[?!,]|(?<![\p{L}\p{N}])\.|\.(?![\p{L}\p{N}])/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 //# sourceMappingURL=shopping-intent.js.map

@@ -189,6 +189,38 @@ describe('VoiceSessionManager', () => {
     return String(started?.sessionId);
   }
 
+  it('forwards verified navigation and synthesizes the same cart confirmation (providers mocked)', async () => {
+    const answer = 'ZENAGE has been added to your cart. Opening your checkout page now.';
+    const navigationAction = {
+      id: 'a'.repeat(64), type: 'OPEN_CHECKOUT' as const,
+      url: 'https://merchant.example/checkout', merchantOrigin: 'https://merchant.example',
+    };
+    const cartOperation = {
+      operation: 'add_to_cart' as const, productId: 'zenage', productName: 'ZENAGE',
+      quantity: 1, cartVerified: true as const, cartUrl: 'https://merchant.example/cart',
+      checkoutUrl: navigationAction.url, navigationAction,
+    };
+    sttTranscribe.mockResolvedValue({
+      text: 'Add ZENAGE to my cart.', language: 'en', confidence: 0.99, isFinal: true,
+      recognitionQuality: { reliable: true, reason: 'accepted' },
+    });
+    agentInvoke.mockResolvedValue({
+      success: true, answer, model: 'verified-cart', toolCalls: [], sources: [],
+      ...cartOperation, cartOperation,
+    });
+    const sessionId = await beginSession();
+    for (let index = 0; index < 11; index++) {
+      manager.handleBinary(socket, frame(index, 1, 3200));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+    expect(sentEvents.find(event => event.type === 'voice.assistant.response')).toMatchObject({
+      sessionId, data: { answer, success: true, cartVerified: true, cartOperation, navigationAction },
+    });
+    expect(tts.synthesize.mock.calls.map(([request]) => request.text).join(' ')).toBe(answer);
+    expect((socket.send as jest.Mock).mock.calls.some(([value]) => Buffer.isBuffer(value))).toBe(true);
+  });
+
   it.each(['remote', 'fallback', 'both_failed'] as const)(
     'routes binary voice audio through configured STT to agent/events: %s (providers mocked)',
     async outcome => {

@@ -18,6 +18,46 @@ The widget stays unavailable until enabled and the page origin is allow-listed. 
 
 ## Website integrations SDK
 
+### Verified cart and checkout navigation
+
+Pass the existing merchant-owned `cartAdapter` to `McZEN.init()`. Its `execute`
+method must support `get_cart` as well as mutations and return the actual cart
+snapshot. McZEN reads the cart before additions/removals, performs the mutation,
+then independently reads it again. The backend checks product identity, stock,
+prices, totals and the expected quantity change before returning success.
+Navigation no longer happens inside the adapter's `openCart` acknowledgement.
+
+Configure trusted destinations on the **backend**, using
+`MCZEN_MERCHANT_NAVIGATION` (JSON keyed by integration UUID):
+
+```dotenv
+MCZEN_MERCHANT_NAVIGATION={"01974a11-3270-7da8-a3fc-c6a06fe90df0":{"cartUrl":"https://merchant.example/cart","checkoutUrl":"https://merchant.example/checkout"}}
+```
+
+Use the actual integration UUID and merchant-supported routes. Omit `checkoutUrl`
+for cart-only merchants. Unconfigured integrations retain the existing `/cart`
+route. Every configured destination must belong to the integration's exact origin;
+production requires HTTPS. Restart the backend after changing this setting.
+Browser-supplied destinations are not accepted as configuration.
+
+Successful adds carry `cartOperation` and `navigationAction`; verified cart reads
+open the cart. Removal/quantity updates never trigger navigation. The same fields
+are sent in text responses and `voice.assistant.response`. English, Hindi and
+Telugu confirmations use the selected/detected language, without asking the LLM
+to claim transaction success.
+
+The SDK checks the destination against the current merchant origin and deduplicates
+operation IDs. It attempts a new tab without interrupting speech, and always
+provides an **Open Checkout** / **Open Cart** fallback link in both chat and voice
+views because popup blockers and `noopener` return values are browser-dependent.
+Cookies/cart storage remain on the merchant origin; no session token is put in a URL.
+Opening a cart or checkout never submits an order or payment.
+
+The standalone React assistant uses the same navigation handler. It fails closed
+unless `VITE_MERCHANT_ORIGIN` is explicitly configured at build time. That setting
+does not create a merchant customer session: dashboard conversations without a
+verified merchant binding still cannot operate a customer's cart.
+
 ### Voice choices and local voice-library status
 
 The widget lists only backend-reported voices for the selected language. It stores
@@ -280,9 +320,11 @@ commit to the real cart, and return persisted read-back:
 Return catalogue values, never caller-supplied prices. Throw on failed
 validation, storage or API operations. Persist operation IDs to prevent duplicate
 additions across polling retries/reload. The SDK caches acknowledgements for
-delivery retry and does not repeat a completed callback. For `open_cart`,
-`openCart()` must finish before success is acknowledged; a missing/throwing
-navigation callback reports failure.
+delivery retry and does not repeat a completed callback. After a mutation the SDK
+independently calls `execute()` with `get_cart` and acknowledges that snapshot,
+not the mutation callback's return value. For `open_cart`, `execute()` reads the
+cart without navigating. Navigation waits for the backend-verified response;
+the legacy `openCart()` callback is no longer used for this operation.
 
 The supplied implementation is a persistent **browser guest cart**, not an
 authenticated/server-authoritative cart or checkout. Recorded products have no

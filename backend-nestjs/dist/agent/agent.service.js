@@ -161,7 +161,7 @@ let AgentService = AgentService_1 = class AgentService {
                 intent = pendingIntent;
             }
         }
-        const vocabulary = ['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP'].includes(intent)
+        const vocabulary = ['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP', 'ADD_TO_CART', 'REMOVE_FROM_CART', 'UPDATE_CART_QUANTITY'].includes(intent)
             ? await this.productIdentity?.vocabulary(context) ?? [] : [];
         let pinnedProduct;
         const wrongProductAnswer = (text) => pinnedProduct !== undefined && ((0, product_identity_service_1.productMentions)(text, vocabulary).some(product => product.externalProductId !== pinnedProduct.externalProductId) ||
@@ -200,7 +200,7 @@ let AgentService = AgentService_1 = class AgentService {
         const configuredModel = this.config.values.llmProvider === 'openai-compatible'
             ? this.config.values.llmModel
             : this.config.values.ollamaModel;
-        const respond = async (success, answer, model = configuredModel) => {
+        const respond = async (success, answer, model = configuredModel, cartOperation) => {
             if (/(?:\b(?:coverage|historical)\s*[:=]|\bsource:\s*public[\\/]|public[\\/]data[\\/]|recorded storefront snapshot|recorded product detail)/i.test(answer)) {
                 this.logger.warn({ event: 'assistant_metadata_rejected', requestId: context.requestId, engine: model });
                 success = false;
@@ -238,6 +238,7 @@ let AgentService = AgentService_1 = class AgentService {
                 toolCalls: executedTools,
                 sources: sources.filter((source, index, all) => all.findIndex((item) => item.id === source.id) === index),
                 ...(products.length > 0 ? { products: products.slice(0, 5) } : {}),
+                ...(success && cartOperation ? { ...cartOperation, cartOperation } : {}),
             };
             if (context.conversationId && this.conversations) {
                 try {
@@ -359,15 +360,29 @@ let AgentService = AgentService_1 = class AgentService {
                 const reference = /\b(this|that|it|selected|first|second|third|more)\b/i.test(question);
                 const genericChange = !(0, shopping_intent_1.productQuery)(question).replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/gi, '').trim();
                 if (!reference && !genericChange && cartIntent && intent !== 'VIEW_CART') {
-                    const name = (0, shopping_intent_1.productQuery)(question).replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/gi, '').trim();
-                    const found = await lookupProduct(name);
-                    if (!found.result.ok)
-                        return respond(false, found.result.error.message, 'verified-cart');
-                    if (found.named.length === 1)
-                        productId = found.named[0].externalProductId;
+                    const name = (0, shopping_intent_1.productQuery)(question)
+                        .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/gi, '')
+                        .trim();
+                    if (explicitProducts.length === 1) {
+                        productId = explicitProducts[0].externalProductId;
+                    }
+                    else if (explicitProducts.length > 1) {
+                        return respond(true, `I found multiple products. Which one would you like to add?`, 'verified-cart');
+                    }
                     else {
-                        await this.merchantCart.updateShoppingContext(context, { pendingClarification: name });
-                        return respond(true, `Which product do you mean by "${name}"? Nothing has been changed.`, 'verified-cart');
+                        const found = await lookupProduct(name);
+                        if (!found.result.ok) {
+                            return respond(false, found.result.error.message, 'verified-cart');
+                        }
+                        if (found.named.length === 1) {
+                            productId = found.named[0].externalProductId;
+                        }
+                        else {
+                            await this.merchantCart.updateShoppingContext(context, {
+                                pendingClarification: name,
+                            });
+                            return respond(true, `Which product do you mean by "${name}"? Nothing has been changed.`, 'verified-cart');
+                        }
                     }
                 }
                 if (referenceDetails) {
@@ -430,6 +445,57 @@ let AgentService = AgentService_1 = class AgentService {
                     }
                     const changed = cart.items.find((i) => isRecord(i) && i.productId === productId);
                     const changedName = isRecord(changed) && typeof changed.name === 'string' ? changed.name : 'the selected product';
+                    const cartUrl = execution.data.cartUrl;
+                    if (execution.data.cartVerified !== true || typeof cartUrl !== 'string' ||
+                        (operation === 'add_to_cart' && (!isRecord(changed) || typeof changed.name !== 'string' ||
+                            typeof changed.quantity !== 'number' || changed.quantity < quantity))) {
+                        return respond(false, 'The merchant did not verify the cart operation. Please inspect your cart before retrying.', 'verified-cart');
+                    }
+                    if (['add_to_cart', 'get_cart', 'open_cart'].includes(operation)) {
+                        const navigation = execution.data.navigationAction;
+                        if (!context.merchant || !isRecord(navigation) || typeof navigation.id !== 'string' ||
+                            !/^[a-f0-9]{64}$/.test(navigation.id) || !['OPEN_CHECKOUT', 'OPEN_CART'].includes(String(navigation.type)) ||
+                            typeof navigation.url !== 'string' || navigation.merchantOrigin !== context.merchant.origin) {
+                            return respond(false, 'The cart was updated, but its navigation instruction could not be verified. Please open the merchant cart manually.', 'verified-cart');
+                        }
+                        let destination;
+                        try {
+                            destination = new URL(navigation.url);
+                        }
+                        catch {
+                            return respond(false, 'The merchant cart URL is invalid. Please open the merchant cart manually.', 'verified-cart');
+                        }
+                        if (destination.origin !== context.merchant.origin || destination.username || destination.password ||
+                            navigation.url !== (navigation.type === 'OPEN_CHECKOUT' ? execution.data.checkoutUrl : cartUrl) ||
+                            (navigation.type === 'OPEN_CHECKOUT' && operation !== 'add_to_cart')) {
+                            return respond(false, 'The merchant cart URL could not be verified. Please open the merchant cart manually.', 'verified-cart');
+                        }
+                        const cartOperation = {
+                            operation, ...(productId ? { productId, productName: changedName, quantity } : {}),
+                            cartVerified: true, cartUrl,
+                            ...(typeof execution.data.checkoutUrl === 'string' ? { checkoutUrl: execution.data.checkoutUrl } : {}),
+                            navigationAction: {
+                                id: navigation.id, type: navigation.type === 'OPEN_CHECKOUT' ? 'OPEN_CHECKOUT' : 'OPEN_CART',
+                                url: destination.href, merchantOrigin: context.merchant.origin,
+                            },
+                        };
+                        await this.merchantCart.updateShoppingContext(context, {
+                            ...(productId ? { currentProductId: productId, currentProductName: changedName } : {}),
+                            lastCartAction: operation, pendingClarification: '',
+                        });
+                        const checkout = cartOperation.navigationAction?.type === 'OPEN_CHECKOUT';
+                        const language = context.language ?? 'en';
+                        const answer = operation === 'add_to_cart'
+                            ? language === 'te'
+                                ? `${changedName} మీ కార్ట్‌లో జోడించబడింది. ఇప్పుడు మీ ${checkout ? 'చెక్అవుట్' : 'కార్ట్'} పేజీని తెరుస్తున్నాను.`
+                                : language === 'hi'
+                                    ? `${changedName} आपके कार्ट में जोड़ दिया गया है। अब आपका ${checkout ? 'चेकआउट' : 'कार्ट'} पेज खोल रहा हूँ।`
+                                    : `${changedName} has been added to your cart. Opening your ${checkout ? 'checkout' : 'cart'} page now.`
+                            : language === 'te' ? 'ఇప్పుడు మీ కార్ట్ పేజీని తెరుస్తున్నాను.'
+                                : language === 'hi' ? 'अब आपका कार्ट पेज खोल रहा हूँ।'
+                                    : `Your cart contains ${cart.itemCount} unit${cart.itemCount === 1 ? '' : 's'}, total ${cart.total} ${cart.currency}. Opening your cart page now.`;
+                        return respond(true, answer, 'verified-cart', cartOperation);
+                    }
                     await this.merchantCart.updateShoppingContext(context, {
                         ...(productId ? { currentProductId: productId, currentProductName: changedName } : {}),
                         lastCartAction: operation, pendingClarification: '',
@@ -441,7 +507,10 @@ let AgentService = AgentService_1 = class AgentService {
                                     operation === 'open_cart' ? 'Opened your merchant cart. ' : '';
                     const contents = operation === 'get_cart' ? cart.items.filter(isRecord)
                         .map(item => `${item.name}: ${item.quantity} unit${item.quantity === 1 ? '' : 's'}`).join('; ') : '';
-                    return respond(true, `${prefix}${contents ? `${contents}. ` : ''}Your cart contains ${cart.itemCount} unit${cart.itemCount === 1 ? '' : 's'}, total ${cart.total} ${cart.currency}. Checkout and payment are not connected.`, 'verified-cart');
+                    return respond(true, `${prefix}${contents ? `${contents}. ` : ''}Your cart contains ${cart.itemCount} unit${cart.itemCount === 1 ? '' : 's'}, total ${cart.total} ${cart.currency}. No order or payment has been submitted.`, 'verified-cart', {
+                        operation, ...(productId ? { productId, productName: changedName, quantity } : {}),
+                        cartVerified: true, cartUrl,
+                    });
                 }
             }
         }

@@ -18,14 +18,60 @@ const node_crypto_1 = require("node:crypto");
 const promises_1 = require("node:timers/promises");
 const shared_state_1 = require("../shared-state/shared-state");
 const website_integration_repository_1 = require("./website-integration.repository");
+const uuid_1 = require("../common/ids/uuid");
 const hash = (value) => (0, node_crypto_1.createHash)('sha256').update(value).digest('hex');
 const record = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 let MerchantCartService = class MerchantCartService {
     store;
     products;
+    navigation = this.readNavigation();
     constructor(store, products) {
         this.store = store;
         this.products = products;
+    }
+    readNavigation() {
+        const raw = process.env.MCZEN_MERCHANT_NAVIGATION;
+        if (!raw)
+            return {};
+        let value;
+        try {
+            value = JSON.parse(raw);
+        }
+        catch {
+            throw new Error('MCZEN_MERCHANT_NAVIGATION must be a JSON object keyed by integration ID.');
+        }
+        if (!record(value))
+            throw new Error('MCZEN_MERCHANT_NAVIGATION must be a JSON object keyed by integration ID.');
+        const config = {};
+        for (const [id, entry] of Object.entries(value)) {
+            if (!(0, uuid_1.isUuidv7)(id) || !record(entry) || Object.keys(entry).some(key => !['cartUrl', 'checkoutUrl'].includes(key)) ||
+                typeof entry.cartUrl !== 'string' || (entry.checkoutUrl !== undefined && typeof entry.checkoutUrl !== 'string')) {
+                throw new Error('MCZEN_MERCHANT_NAVIGATION contains invalid merchant URL configuration.');
+            }
+            config[id] = { cartUrl: entry.cartUrl, ...(typeof entry.checkoutUrl === 'string' ? { checkoutUrl: entry.checkoutUrl } : {}) };
+        }
+        return config;
+    }
+    navigationUrls(binding) {
+        const config = this.navigation[binding.integrationId];
+        const validate = (raw) => {
+            let url;
+            try {
+                url = new URL(raw);
+            }
+            catch {
+                throw new common_1.BadRequestException('Invalid configured merchant navigation URL.');
+            }
+            if (url.origin !== binding.origin || url.username || url.password || !['http:', 'https:'].includes(url.protocol) ||
+                (process.env.NODE_ENV === 'production' && url.protocol !== 'https:')) {
+                throw new common_1.BadRequestException('Configured navigation URL is outside the authorised merchant origin.');
+            }
+            return url.href;
+        };
+        return {
+            cartUrl: validate(config?.cartUrl ?? new URL('/cart', binding.origin).href),
+            ...(config?.checkoutUrl ? { checkoutUrl: validate(config.checkoutUrl) } : {}),
+        };
     }
     scope(tenant, binding) {
         return `merchant-cart:${tenant}:${binding.integrationId}:${binding.sessionId}`;
@@ -145,14 +191,27 @@ let MerchantCartService = class MerchantCartService {
         }
         const action = JSON.parse(pending);
         if (body.success) {
+            const integration = await this.products.activeRecord(tenant, binding.integrationId);
+            if (!integration || integration.origin !== binding.origin) {
+                throw new common_1.BadRequestException('Merchant integration changed before cart verification.');
+            }
             const cart = await this.validateSnapshot(tenant, binding, body.cart);
             const item = cart.items.find(i => i.productId === action.productId && i.variantId === action.variantId);
-            if ((action.operation === 'add_to_cart' && (!item || item.quantity < (action.quantity ?? 1))) ||
+            if ((action.operation === 'add_to_cart' && (!item || item.quantity !== action.expectedQuantity)) ||
                 (action.operation === 'update_cart_item' && item?.quantity !== action.quantity) ||
-                (action.operation === 'remove_cart_item' && action.quantity === undefined && item)) {
+                (action.operation === 'remove_cart_item' && (item?.quantity ?? 0) !== action.expectedQuantity)) {
                 throw new common_1.BadRequestException('The merchant cart read-back does not confirm the requested change.');
             }
-            await this.store.put(`${scope}:result:${action.id}`, JSON.stringify({ success: true, cart }), 60_000);
+            const urls = this.navigationUrls(binding);
+            const navigationAction = action.operation === 'add_to_cart'
+                ? { id: action.id, type: urls.checkoutUrl ? 'OPEN_CHECKOUT' : 'OPEN_CART', url: urls.checkoutUrl ?? urls.cartUrl, merchantOrigin: binding.origin }
+                : ['get_cart', 'open_cart'].includes(action.operation)
+                    ? { id: action.id, type: 'OPEN_CART', url: urls.cartUrl, merchantOrigin: binding.origin } : undefined;
+            await this.store.put(`${scope}:result:${action.id}`, JSON.stringify({
+                success: true, cart, operation: action.operation, productId: action.productId,
+                productName: item?.name, quantity: action.quantity, cartVerified: true, ...urls,
+                ...(navigationAction ? { navigationAction } : {}),
+            }), 60_000);
         }
         else {
             if (typeof body.error !== 'string' || !body.error.trim() || body.error.length > 300) {
@@ -162,7 +221,7 @@ let MerchantCartService = class MerchantCartService {
         }
         return { acknowledged: true };
     }
-    async execute(operation, input, context, signal) {
+    async execute(operation, input, context, signal, deadline = Date.now() + 15_000) {
         const binding = context.merchant;
         if (context.channel !== 'widget' || !binding)
             return { success: false, error: 'A verified merchant customer session is required.' };
@@ -171,11 +230,17 @@ let MerchantCartService = class MerchantCartService {
             return { success: false, error: 'This merchant session is no longer authorised.' };
         }
         const scope = this.scope(context.tenantId, binding);
+        this.navigationUrls(binding);
         if (!await this.store.get(`${scope}:available`))
             return { success: false, error: 'The merchant cart adapter is offline. Open the merchant website and try again.' };
         const productId = typeof input.productId === 'string' ? input.productId : undefined;
         const variantId = typeof input.variantId === 'string' ? input.variantId : undefined;
         const quantity = input.quantity;
+        const actionId = hash(`${context.requestId}:${operation}:${JSON.stringify({ productId, variantId, quantity })}`);
+        const saved = await this.store.get(`${scope}:result:${actionId}`);
+        if (saved)
+            return JSON.parse(saved);
+        let expectedQuantity;
         if (['add_to_cart', 'update_cart_item', 'remove_cart_item'].includes(operation)) {
             if (!productId)
                 return { success: false, error: 'Choose a product first.' };
@@ -198,21 +263,32 @@ let MerchantCartService = class MerchantCartService {
                     return { success: false, error: 'The product is out of stock or its availability cannot be verified.' };
                 }
             }
+            if (operation === 'add_to_cart' || operation === 'remove_cart_item') {
+                const before = await this.execute('get_cart', {}, { ...context, requestId: `${actionId}:before` }, signal, deadline);
+                if (!before.success || !before.cart)
+                    return { success: false, error: 'The merchant cart could not be read before the change.' };
+                const current = before.cart.items.find(item => item.productId === productId)?.quantity ?? 0;
+                expectedQuantity = operation === 'add_to_cart' ? current + Number(quantity) :
+                    quantity === undefined ? 0 : Math.max(0, current - Number(quantity));
+                if (operation === 'add_to_cart' && (expectedQuantity > 99 || expectedQuantity > Number(rows[0].stock))) {
+                    return { success: false, error: 'The requested cart quantity exceeds verified stock or the cart quantity limit.' };
+                }
+            }
         }
         const action = {
-            id: hash(`${context.requestId}:${operation}:${JSON.stringify({ productId, variantId, quantity })}`),
+            id: actionId,
             operation, ...(productId ? { productId } : {}), ...(variantId ? { variantId } : {}),
             ...(quantity !== undefined ? { quantity: Number(quantity) } : {}),
+            ...(expectedQuantity !== undefined ? { expectedQuantity } : {}),
         };
-        const saved = await this.store.get(`${scope}:result:${action.id}`);
-        if (saved)
-            return JSON.parse(saved);
+        if (signal.aborted || Date.now() >= deadline) {
+            return { success: false, error: 'The merchant cart operation timed out. Check the cart before retrying.' };
+        }
         const acquired = await this.store.acquireSlot(scope, action.id, 1, 20_000);
         if (!acquired)
             return { success: false, error: 'A merchant cart operation is already pending. Check the cart before retrying.' };
         try {
             await this.store.put(`${scope}:pending`, JSON.stringify(action), 18_000);
-            const deadline = Date.now() + 15_000;
             while (Date.now() < deadline) {
                 if (signal.aborted)
                     break;

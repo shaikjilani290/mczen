@@ -115,11 +115,13 @@ export function createWidgetClient({
         if (!acknowledgement) {
           try {
             const cart = await cartAdapter.execute(action);
-            if (action.operation === "open_cart") {
-              if (typeof cartAdapter.openCart !== "function") throw new WidgetError("failed", "The merchant cart page cannot be opened by this adapter.");
-              await cartAdapter.openCart();
-            }
-            acknowledgement = { id: action.id, success: true, cart };
+            const readBack = ["add_to_cart", "update_cart_item", "remove_cart_item"].includes(action.operation)
+              ? await cartAdapter.execute({
+                id: Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",
+                  new TextEncoder().encode(`${action.id}:read-back`))), byte => byte.toString(16).padStart(2, "0")).join(""),
+                operation: "get_cart",
+              }) : cart;
+            acknowledgement = { id: action.id, success: true, cart: readBack };
           } catch (error) {
             acknowledgement = { id: action.id, success: false, error: (error?.message || "The merchant cart operation failed.").slice(0, 300) };
           }
@@ -192,6 +194,8 @@ export function createWidgetClient({
       answer: result.answer,
       sources: result.sources || [],
       products: Array.isArray(result.products) ? result.products.slice(0, 5) : [],
+      ...(result.cartOperation ? { cartOperation: result.cartOperation } : {}),
+      ...(result.navigationAction ? { navigationAction: result.navigationAction } : {}),
     };
   }
 

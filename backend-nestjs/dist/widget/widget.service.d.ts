@@ -103,6 +103,15 @@ export declare class WidgetService {
     ask(sessionToken: string | undefined, origin: string | undefined, message: string, language: WidgetLanguage | undefined, requestId?: string): Promise<{
         sessionToken: string;
         expiresAt: string;
+        navigationAction?: import("../website-integrations/merchant-cart.service").MerchantNavigationAction;
+        cartOperation?: import("../website-integrations/merchant-cart.service").VerifiedCartOperation | undefined;
+        operation?: ("add_to_cart" | "get_cart" | "update_cart_item" | "remove_cart_item" | "open_cart") | undefined;
+        productId?: string;
+        productName?: string;
+        quantity?: number;
+        cartVerified?: true | undefined;
+        cartUrl?: string | undefined;
+        checkoutUrl?: string;
         products?: import("../agent/agent.service").AgentProductCard[] | undefined;
         success: boolean;
         answer: string;

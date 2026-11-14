@@ -83,6 +83,15 @@ export declare class WebsiteIntegrationPublicController {
     message(body: unknown, authorization: string | undefined, origin: string | undefined): Promise<{
         sessionToken: string;
         expiresAt: string;
+        navigationAction?: import("./merchant-cart.service").MerchantNavigationAction;
+        cartOperation?: import("./merchant-cart.service").VerifiedCartOperation | undefined;
+        operation?: ("add_to_cart" | "get_cart" | "update_cart_item" | "remove_cart_item" | "open_cart") | undefined;
+        productId?: string;
+        productName?: string;
+        quantity?: number;
+        cartVerified?: true | undefined;
+        cartUrl?: string | undefined;
+        checkoutUrl?: string;
         products?: import("../agent/agent.service").AgentProductCard[] | undefined;
         success: boolean;
         answer: string;

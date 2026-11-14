@@ -84,6 +84,7 @@ export function createWidgetVoice({ client, apiBase, onState, onPartial, onFinal
           event.data.answer || "",
           Array.isArray(event.data.sources) ? event.data.sources : [],
           Array.isArray(event.data.products) ? event.data.products.slice(0, 5) : [],
+          event.data,
         );
       },
       ...clientOptions,

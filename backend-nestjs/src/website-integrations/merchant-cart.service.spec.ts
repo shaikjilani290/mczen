@@ -21,23 +21,136 @@ describe('merchant guest cart coordination (mocked catalogue and merchant read-b
     cart = new MerchantCartService(new MemorySharedState(), repository);
   });
 
-  async function pending() {
-    for (let i = 0; i < 30; i++) {
+    it('opens configured checkout only after verified addition, with stable action ID', async () => {
+      const previous = process.env.MCZEN_MERCHANT_NAVIGATION;
+      process.env.MCZEN_MERCHANT_NAVIGATION = JSON.stringify({
+        [integrationId]: { cartUrl: `${binding.origin}/basket`, checkoutUrl: `${binding.origin}/checkout` },
+      });
+      try {
+        cart = new MerchantCartService(new MemorySharedState(), repository);
+        await cart.poll(tenantId, binding, {});
+        const executing = cart.execute('add_to_cart', { productId: 'tea', quantity: 2 }, context, new AbortController().signal);
+        const action = await pending();
+        await cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot });
+        const result = await executing;
+        expect(result).toMatchObject({
+          success: true, operation: 'add_to_cart', productId: 'tea', productName: 'Tea', quantity: 2,
+          cartVerified: true, cartUrl: `${binding.origin}/basket`, checkoutUrl: `${binding.origin}/checkout`,
+          navigationAction: { id: action.id, type: 'OPEN_CHECKOUT', url: `${binding.origin}/checkout`, merchantOrigin: binding.origin },
+        });
+        expect(await cart.execute('add_to_cart', { productId: 'tea', quantity: 2 }, context, new AbortController().signal)).toEqual(result);
+      } finally {
+        if (previous === undefined) delete process.env.MCZEN_MERCHANT_NAVIGATION;
+        else process.env.MCZEN_MERCHANT_NAVIGATION = previous;
+      }
+    });
+
+    it('rejects an unchanged pre-existing cart line rather than claiming addition', async () => {
+      await cart.poll(tenantId, binding, {});
+      const controller = new AbortController();
+      const executing = cart.execute('add_to_cart', { productId: 'tea', quantity: 1 }, context, controller.signal).catch(() => undefined);
+      const action = await pending(snapshot);
+      expect(action.expectedQuantity).toBe(3);
+      await expect(cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot })).rejects.toThrow('requested change');
+      controller.abort();
+      await executing;
+    });
+
+    it('rejects out-of-stock additions before any merchant action', async () => {
+      await cart.poll(tenantId, binding, {});
+      jest.spyOn(repository, 'searchProducts').mockResolvedValue([{ ...product, stock: 0, availability: 'out_of_stock' }]);
+      const result = await cart.execute('add_to_cart', { productId: 'tea', quantity: 1 }, context, new AbortController().signal);
+      expect(result).toMatchObject({ success: false });
+      expect(result.navigationAction).toBeUndefined();
+      expect(await cart.poll(tenantId, binding, {})).toEqual({ action: null });
+    });
+
+    it('reads verified cart and returns cart navigation without claiming checkout', async () => {
+      await cart.poll(tenantId, binding, {});
+      const executing = cart.execute('get_cart', {}, context, new AbortController().signal);
+      let action;
+      for (let i = 0; i < 50 && !action; i++) {
+        action = (await cart.poll(tenantId, binding, {})).action;
+        if (!action) await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      if (!action) throw new Error('Missing cart read');
+      await cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot });
+      await expect(executing).resolves.toMatchObject({ success: true, cartVerified: true,
+        navigationAction: { type: 'OPEN_CART', url: `${binding.origin}/cart` } });
+    });
+
+    it('verifies quantity updates without navigation', async () => {
+      await cart.poll(tenantId, binding, {});
+      const executing = cart.execute('update_cart_item', { productId: 'tea', quantity: 2 }, context, new AbortController().signal);
+      const action = await pending();
+      await cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot });
+      const result = await executing;
+      expect(result.cartVerified).toBe(true);
+      expect(result.navigationAction).toBeUndefined();
+    });
+
+    it('rejects configured cross-origin checkout and frontend-supplied URLs', async () => {
+      const previous = process.env.MCZEN_MERCHANT_NAVIGATION;
+      process.env.MCZEN_MERCHANT_NAVIGATION = JSON.stringify({
+        [integrationId]: { cartUrl: `${binding.origin}/cart`, checkoutUrl: 'https://untrusted.example/checkout' },
+      });
+      try {
+        cart = new MerchantCartService(new MemorySharedState(), repository);
+        await expect(cart.execute('get_cart', {}, context, new AbortController().signal)).rejects.toThrow('authorised merchant origin');
+        await expect(cart.complete(tenantId, binding, {
+          id: 'a'.repeat(64), success: true, cart: snapshot, checkoutUrl: `${binding.origin}/checkout`,
+        })).rejects.toThrow('acknowledgement');
+      } finally {
+        if (previous === undefined) delete process.env.MCZEN_MERCHANT_NAVIGATION;
+        else process.env.MCZEN_MERCHANT_NAVIGATION = previous;
+      }
+    });
+  async function pending(before = { items: [], itemCount: 0, total: 0, currency: 'INR', cartPath: '/cart' } as typeof snapshot) {
+    for (let i = 0; i < 100; i++) {
       const result = await cart.poll(tenantId, binding, {});
-      if (result.action) return result.action;
+      if (result.action?.operation === 'get_cart') {
+        await cart.complete(tenantId, binding, { id: result.action.id, success: true, cart: before });
+      } else if (result.action) return result.action;
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     throw new Error('Missing pending action');
   }
+
+  it('rejects acknowledgement when the merchant origin changes', async () => {
+    await cart.poll(tenantId, binding, {});
+    const controller = new AbortController();
+    const executing = cart.execute('update_cart_item', { productId: 'tea', quantity: 2 }, context, controller.signal);
+    const action = await pending();
+    jest.spyOn(repository, 'activeRecord').mockResolvedValue(undefined);
+    await expect(cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot }))
+      .rejects.toThrow('integration changed');
+    controller.abort();
+    await expect(executing).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await cart.poll(tenantId, binding, {})).action).toBeNull();
+  });
+
+  it('does not enqueue a mutation after its deadline or cancellation', async () => {
+    await cart.poll(tenantId, binding, {});
+    const controller = new AbortController();
+    controller.abort();
+    const result = await cart.execute('update_cart_item', { productId: 'tea', quantity: 2 }, context, controller.signal);
+    expect(result.success).toBe(false);
+    expect((await cart.poll(tenantId, binding, {})).action).toBeNull();
+    const expired = await cart.execute('update_cart_item', { productId: 'tea', quantity: 2 },
+      context, new AbortController().signal, Date.now() - 1);
+    expect(expired.success).toBe(false);
+    expect((await cart.poll(tenantId, binding, {})).action).toBeNull();
+  });
 
   it('waits for validated merchant read-back and prevents repeat additions within a request', async () => {
     await cart.poll(tenantId, binding, {});
     const executing = cart.execute('add_to_cart', { productId: 'tea', quantity: 2 }, context, new AbortController().signal);
     const action = await pending();
     await cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot });
-    await expect(executing).resolves.toEqual({ success: true, cart: snapshot });
+    await expect(executing).resolves.toMatchObject({ success: true, cart: snapshot, cartVerified: true,
+      navigationAction: { type: 'OPEN_CART', url: `${binding.origin}/cart` } });
     await expect(cart.execute('add_to_cart', { productId: 'tea', quantity: 2 }, context, new AbortController().signal))
-      .resolves.toEqual({ success: true, cart: snapshot });
+      .resolves.toMatchObject({ success: true, cart: snapshot, cartVerified: true });
     expect(await cart.poll(tenantId, binding, {})).toEqual({ action: null });
     expect(repository.searchProducts).toHaveBeenCalledWith(tenantId, assistantId, expect.objectContaining({ integrationId, ids: ['tea'] }));
   });
@@ -120,10 +233,10 @@ describe('merchant guest cart coordination (mocked catalogue and merchant read-b
   it('acknowledges relative removals without requiring the whole line to disappear', async () => {
     await cart.poll(tenantId, binding, {});
     const executing = cart.execute('remove_cart_item', { productId: 'tea', quantity: 1 }, context, new AbortController().signal);
-    const action = await pending();
+    const action = await pending({ ...snapshot, items: [{ ...snapshot.items[0], quantity: 3 }], itemCount: 3, total: 36 });
     expect(action).toMatchObject({ operation: 'remove_cart_item', quantity: 1 });
     await cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot });
-    await expect(executing).resolves.toEqual({ success: true, cart: snapshot });
+    await expect(executing).resolves.toMatchObject({ success: true, cart: snapshot, cartVerified: true });
     await expect(cart.execute('remove_cart_item', { productId: 'tea', quantity: 0 }, context, new AbortController().signal))
       .resolves.toMatchObject({ success: false });
   });

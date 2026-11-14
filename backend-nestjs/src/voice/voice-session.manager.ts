@@ -1008,6 +1008,8 @@ export class VoiceSessionManager {
       toolCalls: result.toolCalls.slice(0, 50),
       sources: result.sources.slice(0, 50),
       ...(result.products ? { products: result.products.slice(0, 5) } : {}),
+      ...(result.cartOperation ? { ...result.cartOperation, cartOperation: result.cartOperation } : {}),
+      ...(result.navigationAction ? { navigationAction: result.navigationAction } : {}),
       turnId,
       agentMs: session.timing?.agentMs,
     }, session);

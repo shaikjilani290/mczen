@@ -28,6 +28,23 @@ export interface CartAction {
     productId?: string;
     variantId?: string;
     quantity?: number;
+    expectedQuantity?: number;
+}
+export interface MerchantNavigationAction {
+    id: string;
+    type: 'OPEN_CHECKOUT' | 'OPEN_CART';
+    url: string;
+    merchantOrigin: string;
+}
+export interface VerifiedCartOperation {
+    operation: Operation;
+    productId?: string;
+    productName?: string;
+    quantity?: number;
+    cartVerified: true;
+    cartUrl: string;
+    checkoutUrl?: string;
+    navigationAction?: MerchantNavigationAction;
 }
 export interface ShoppingContext {
     currentProductId?: string;
@@ -40,7 +57,10 @@ export interface ShoppingContext {
 export declare class MerchantCartService {
     private readonly store;
     private readonly products;
+    private readonly navigation;
     constructor(store: SharedState, products: WebsiteIntegrationRepository);
+    private readNavigation;
+    private navigationUrls;
     private scope;
     poll(tenant: string, binding: MerchantBinding, body: unknown): Promise<{
         action: CartAction | null;
@@ -57,11 +77,11 @@ export declare class MerchantCartService {
     complete(tenant: string, binding: MerchantBinding, body: unknown): Promise<{
         acknowledged: boolean;
     }>;
-    execute(operation: Operation, input: Record<string, unknown>, context: AgentExecutionContext, signal: AbortSignal): Promise<{
+    execute(operation: Operation, input: Record<string, unknown>, context: AgentExecutionContext, signal: AbortSignal, deadline?: number): Promise<{
         success: boolean;
         cart?: MerchantCartSnapshot;
         error?: string;
-    }>;
+    } & Partial<VerifiedCartOperation>>;
     private validateSnapshot;
 }
 export {};

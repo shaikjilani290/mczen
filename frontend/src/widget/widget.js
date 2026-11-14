@@ -1,5 +1,6 @@
 import { createWidgetClient, resolveApiBase } from "./client.js";
 import { createWidgetVoice, voiceSupport } from "./voice.js";
+import { createMerchantNavigation } from "./merchant-navigation.js";
 
 const LANG_LABELS = { en: "English", hi: "\u0939\u093f\u0928\u094d\u0926\u0940", te: "\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41" };
 const RADIUS = { round: "50%", pill: "999px", square: "14px" };
@@ -167,6 +168,19 @@ export function mountWidget({ publicKey, assistantId, apiBase, integration = fal
   const sendBtn = el("button", { type: "submit", class: "send", "aria-label": "Send message" }, svgIcon(ICONS.send, 19));
   sendBtn.disabled = true;
   const note = el("div", { class: "note" });
+  const navigationLink = el("a", { target: "_blank", rel: "noopener noreferrer", class: "note" });
+  const voiceNavigationLink = el("a", { target: "_blank", rel: "noopener noreferrer", class: "note" });
+  navigationLink.hidden = true;
+  voiceNavigationLink.hidden = true;
+  const navigation = createMerchantNavigation({
+    merchantOrigin: integration ? location.origin : undefined,
+    onFallback: ({ url, label }) => {
+      for (const link of [navigationLink, voiceNavigationLink]) {
+        link.href = url; link.textContent = label; link.hidden = false;
+      }
+    },
+    onError: message => add(message, "e"),
+  });
   const vstate = el("div", { class: "vstate", "aria-live": "polite" });
   const mic = el("button", { type: "button", class: "mic", "aria-label": "Start voice", "aria-pressed": "false" }, svgIcon(ICONS.mic, 19));
   const stopBtn = el("button", { type: "button", class: "stop", "aria-label": "Stop assistant speaking" }, "Stop");
@@ -198,6 +212,7 @@ export function mountWidget({ publicKey, assistantId, apiBase, integration = fal
         el("span", { class: "orb-ring r1" }), el("span", { class: "orb-ring r2" }), el("span", { class: "orb-ring r3" })),
       el("div", { class: "listen-copy" }, prompt)),
     listenState,
+    voiceNavigationLink,
     el("div", { class: "listen-actions" }, speakerBtn, listenMic, keyboardBtn));
   listening.hidden = true;
 
@@ -364,10 +379,11 @@ export function mountWidget({ publicKey, assistantId, apiBase, integration = fal
       else streamedMessage.firstChild.textContent += ` ${text}`;
       log.scrollTop = log.scrollHeight;
     },
-    onResponse: (text, sources, products) => {
+    onResponse: (text, sources, products, response) => {
       streamedMessage?.remove();
       streamedMessage = null;
       add(text, "", sources, products);
+      navigation.handle(response);
     },
     onError: (message) => add(message, "e"),
   });
@@ -407,6 +423,7 @@ export function mountWidget({ publicKey, assistantId, apiBase, integration = fal
       const reply = await client.send(text, language);
       wait.remove();
       add(reply.answer || "", "", reply.sources, reply.products);
+      navigation.handle(reply);
     } catch (error) {
       wait.remove();
       add(error.message, "e");
@@ -440,7 +457,7 @@ export function mountWidget({ publicKey, assistantId, apiBase, integration = fal
   const header = el("header", {}, logo, title, select,
     el("button", { "aria-label": "Minimize", onclick: () => setOpen(false) }, "\u2013"),
     el("button", { "aria-label": "Close", onclick: () => setOpen(false) }, "\u00d7"));
-  panel.append(header, voiceSelect, log, vstate, note, form, listening);
+  panel.append(header, voiceSelect, log, vstate, note, navigationLink, form, listening);
   fab.addEventListener("click", () => setOpen(panel.hidden));
   root.append(panel, fab);
   updateNote();

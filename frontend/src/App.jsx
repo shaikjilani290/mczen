@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { voiceApi } from "./voice/voiceApi.js";
 import { VoiceClient } from "./voice/voiceClient.js";
+import { createMerchantNavigation } from "./widget/merchant-navigation.js";
 import { getVoiceOptions, hasSpeechOutput, LANGUAGE_LABELS, mapTranscript } from "./voice/voiceCapabilities.js";
 
 const QUICK_PROMPTS = [
@@ -184,6 +185,15 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [sheet, setSheet] = useState(null);
   const clientRef = useRef(null);
+  const [merchantNavigation, setMerchantNavigation] = useState(null);
+  const navigationRef = useRef(null);
+  if (!navigationRef.current) {
+    navigationRef.current = createMerchantNavigation({
+      merchantOrigin: import.meta.env.VITE_MERCHANT_ORIGIN || undefined,
+      onFallback: setMerchantNavigation,
+      onError: message => setError(message),
+    });
+  }
   const transcriptEnd = useRef(null);
   const composerRef = useRef(null);
   const interruptedTimerRef = useRef(null);
@@ -213,6 +223,7 @@ export default function App() {
         createdAt: event.ts,
       }]);
     } else if (event.type === "voice.assistant.response") {
+      navigationRef.current.handle(event.data);
       setMessages((items) => [...items, {
         role: "assistant",
         content: event.data.answer || "",
@@ -413,6 +424,7 @@ export default function App() {
       setMessages((items) => [...items, { role: "user", content: question, createdAt: new Date().toISOString() }]);
       const result = await voiceApi.ask(session.token, question, activeConversation);
       if (typeof result.answer !== "string") throw new Error("McZEN returned an invalid response.");
+      navigationRef.current.handle(result);
       setMessages((items) => [...items, {
         role: "assistant",
         content: result.answer,
@@ -439,6 +451,7 @@ export default function App() {
     setSession(null);
     setAssistants([]);
     setConversations([]);
+    setMerchantNavigation(null);
     setConversationId("");
     setMessages([]);
   }
@@ -611,6 +624,11 @@ export default function App() {
         )}
 
         <div className="dock">
+          {merchantNavigation && (
+            <a href={merchantNavigation.url} target="_blank" rel="noopener noreferrer">
+              {merchantNavigation.label}
+            </a>
+          )}
           <form className="composer" onSubmit={submitText}>
             <input
               ref={composerRef}

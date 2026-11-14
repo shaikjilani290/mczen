@@ -4,14 +4,14 @@ import { ToolExecutorService } from './tools/tool-executor.service';
 import { ToolPermissionService } from './tools/tool-permission.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { ConversationsService } from '../conversations/conversations.service';
-import { MerchantCartService } from '../website-integrations/merchant-cart.service';
+import { MerchantCartService, type VerifiedCartOperation } from '../website-integrations/merchant-cart.service';
 import { ProductIdentityService } from '../website-integrations/product-identity.service';
 import { WebsiteKnowledgeEngine } from '../website-integrations/website-knowledge.engine';
 export interface AgentTurnOptions {
     signal?: AbortSignal;
     onText?: (text: string) => void;
 }
-export interface AgentResponse {
+export interface AgentResponse extends Partial<VerifiedCartOperation> {
     success: boolean;
     answer: string;
     model: string;
@@ -25,6 +25,8 @@ export interface AgentResponse {
         source: string;
     }>;
     products?: AgentProductCard[];
+    cartOperation?: VerifiedCartOperation;
+    navigationAction?: VerifiedCartOperation['navigationAction'];
 }
 export interface AgentProductCard {
     externalProductId: string;

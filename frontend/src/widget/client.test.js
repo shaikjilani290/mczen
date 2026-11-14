@@ -183,7 +183,11 @@ test("merchant cart waits for an actual adapter result and retries acknowledgeme
   const client = createWidgetClient({
     apiBase: "https://platform.example", publicKey: "mzp_test", integration: true,
     onCartError: message => errors.push(message),
-    cartAdapter: { execute: async received => { assert.deepEqual(received, action); writes++; return cart; } },
+    cartAdapter: { execute: async received => {
+      if (received.operation !== "get_cart") { assert.deepEqual(received, action); writes++; }
+      else assert.notEqual(received.id, action.id);
+      return cart;
+    } },
     fetchImpl: async (url, init) => {
       if (url.endsWith("/connect")) return reply(200, { sessionToken: "guest-session", config: {} });
       assert.equal(init.credentials, "omit");
@@ -232,9 +236,8 @@ for (const scenario of ["opened", "navigation failure", "missing navigation"]) {
     try {
       await client.start();
       await client.setVoiceActive(true);
-      assert.equal(acknowledgement.success, scenario === "opened");
-      assert.equal(openedAtAcknowledgement, scenario === "opened", "navigation must finish before success is sent");
-      if (scenario !== "opened") assert.match(acknowledgement.error, /navigation failed|cannot be opened/i);
+      assert.equal(acknowledgement.success, true);
+      assert.equal(openedAtAcknowledgement, false, "navigation must wait for backend read-back verification");
     } finally { client.destroy(); }
   });
 }
@@ -258,6 +261,23 @@ test("merchant write failure is acknowledged as failure, never cart success", as
 });
 
 const reply = (status, body) => ({ ok: status < 300, status, json: async () => body });
+
+test("text preserves backend verified cart navigation without accepting a client destination", async () => {
+  const navigationAction = { id: "a".repeat(64), type: "OPEN_CHECKOUT", url: "https://shop.example/checkout" };
+  const cartOperation = { operation: "add_to_cart", cartVerified: true, checkoutUrl: navigationAction.url };
+  const client = createWidgetClient({
+    apiBase: "https://platform.example", publicKey: "mzp_test",
+    fetchImpl: async url => reply(200, url.endsWith("/session")
+      ? { sessionToken: "guest-session", config: {} }
+      : { sessionToken: "rotated", success: true, answer: "Added.", cartOperation, navigationAction }),
+  });
+  try {
+    await client.start();
+    const response = await client.send("Add ZENAGE.");
+    assert.deepEqual(response.cartOperation, cartOperation);
+    assert.deepEqual(response.navigationAction, navigationAction);
+  } finally { client.destroy(); }
+});
 
 function harness(handlers) {
   const calls = [];

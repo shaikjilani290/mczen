@@ -177,6 +177,8 @@ export class WidgetService {
         return {
           success: result.success, answer: result.answer, sources: result.sources,
           ...(result.products?.length ? { products: result.products } : {}),
+          ...(result.cartOperation ? { ...result.cartOperation, cartOperation: result.cartOperation } : {}),
+          ...(result.navigationAction ? { navigationAction: result.navigationAction } : {}),
           sessionToken: token, expiresAt: new Date(next.e).toISOString(),
         };
       });

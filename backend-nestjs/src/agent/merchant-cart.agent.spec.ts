@@ -46,10 +46,63 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
     fetchSpy = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('No Ollama call should be needed.'));
   });
   afterEach(() => jest.restoreAllMocks());
-  const confirmed = (quantity: number) => ({ ok: true as const, data: { success: true, cart: {
+  const confirmed = (quantity: number) => ({ ok: true as const, data: { success: true, cartVerified: true,
+    cartUrl: 'https://merchant.example/cart',
+    navigationAction: { id: 'a'.repeat(64), type: 'OPEN_CART', url: 'https://merchant.example/cart', merchantOrigin: 'https://merchant.example' },
+    cart: {
     items: [{ productId, name: 'LASS HEALTH', quantity, unitPrice: 1035, currency: 'INR' }],
     itemCount: quantity, total: quantity * 1035, currency: 'INR', cartPath: '/cart',
   } } });
+
+  it.each([
+    ['en', 'Add ZENAGE to my cart.'],
+    ['hi', 'ZENAGE मेरे कार्ट में जोड़ दें।'],
+    ['te', 'ZENAGE నా కార్ట్‌లో జోడించండి.'],
+  ] as const)('returns verified checkout navigation and %s confirmation for text and voice', async (language, question) => {
+    useVocabulary([{ name: 'ZENAGE', externalProductId: productId }]);
+    for (const modality of ['text', 'voice'] as const) {
+      const resultData = confirmed(1).data;
+      execute.mockResolvedValueOnce({ ok: true, data: {
+        ...resultData, cart: { ...resultData.cart, items: [{ ...resultData.cart.items[0], name: 'ZENAGE' }] },
+        checkoutUrl: 'https://merchant.example/checkout',
+        navigationAction: { ...resultData.navigationAction, type: 'OPEN_CHECKOUT', url: 'https://merchant.example/checkout' },
+      } });
+      const result = await service.ask(question, { ...context, modality, language });
+      expect(result).toMatchObject({
+        success: true, operation: 'add_to_cart', productId, productName: 'ZENAGE', quantity: 1, cartVerified: true,
+        navigationAction: { type: 'OPEN_CHECKOUT', url: 'https://merchant.example/checkout' },
+      });
+      expect(result.answer).toBe(language === 'en'
+        ? 'ZENAGE has been added to your cart. Opening your checkout page now.'
+        : language === 'hi' ? 'ZENAGE आपके कार्ट में जोड़ दिया गया है। अब आपका चेकआउट पेज खोल रहा हूँ।'
+          : 'ZENAGE మీ కార్ట్‌లో జోడించబడింది. ఇప్పుడు మీ చెక్అవుట్ పేజీని తెరుస్తున్నాను.');
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(execute.mock.calls.every(([operation]) => operation === 'add_to_cart')).toBe(true);
+  });
+
+  it('does not navigate for ambiguous product names or unverified merchant results', async () => {
+    useVocabulary([{ name: 'ZENAGE', externalProductId: productId }, { name: 'ZENAGE', externalProductId: 'another-id' }]);
+    execute.mockResolvedValueOnce({ ok: true, data: { products: [] } });
+    const ambiguous = await service.ask('Add ZENAGE to my cart.', context);
+    expect(ambiguous.navigationAction).toBeUndefined();
+    expect(execute.mock.calls.some(([operation]) => operation === 'add_to_cart')).toBe(false);
+    useVocabulary([{ name: 'ZENAGE', externalProductId: productId }]);
+    execute.mockResolvedValueOnce({ ok: true, data: { ...confirmed(1).data, cartVerified: false } });
+    const unverified = await service.ask('Add ZENAGE to my cart.', context);
+    expect(unverified.success).toBe(false);
+    expect(unverified.navigationAction).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects merchant refusal and never navigates on failure', async () => {
+    useVocabulary([{ name: 'ZENAGE', externalProductId: productId }]);
+    execute.mockResolvedValueOnce({ ok: true, data: { success: false, error: 'Merchant rejected addition.' } });
+    const result = await service.ask('Add ZENAGE to my cart.', context);
+    expect(result.success).toBe(false);
+    expect(result.navigationAction).toBeUndefined();
+    expect(result.answer).toBe('Merchant rejected addition.');
+  });
 
   it.each(['Explain ZENAGE.', 'Tell me about ZENAGE.', 'What are the ingredients in ZENAGE?',
     'Explain WEIZAP.', 'Tell me about LASS HEALTH.', 'Explain HALE.O.'])('pins exact identity for %s (mocked STT input)', async question => {
@@ -97,8 +150,8 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
 
   it('resolves this product and adds one more as an incremental unit, without model-generated confirmations', async () => {
     execute.mockResolvedValueOnce(confirmed(1)).mockResolvedValueOnce(confirmed(2));
-    expect((await service.ask('Add this product to my cart.', context)).answer).toContain('Added 1 unit of LASS HEALTH');
-    expect((await service.ask('Add one more.', { ...context, requestId: 'turn-2' })).answer).toContain('contains 2 units');
+    expect((await service.ask('Add this product to my cart.', context)).answer).toContain('LASS HEALTH has been added');
+    expect((await service.ask('Add one more.', { ...context, requestId: 'turn-2' })).answer).toContain('Opening your cart page');
     expect(execute).toHaveBeenLastCalledWith('add_to_cart', { productId, quantity: 1 }, expect.objectContaining({ merchant: context.merchant }), undefined, undefined);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -106,7 +159,7 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
     execute.mockResolvedValueOnce(confirmed(3)).mockResolvedValueOnce(confirmed(3));
     expect((await service.ask('Increase quantity to three.', context)).answer).toContain('to 3 units');
     expect(execute).toHaveBeenNthCalledWith(1, 'update_cart_item', { productId, quantity: 3 }, expect.anything(), undefined, undefined);
-    expect((await service.ask('How many items are in my cart?', context)).answer).toContain('contains 3 units');
+    expect((await service.ask('How many items are in my cart?', context)).answer).toContain('Opening your cart page');
     expect(execute).toHaveBeenLastCalledWith('get_cart', {}, expect.anything(), undefined, undefined);
   });
   it('returns actual merchant failure without ever saying an item was added', async () => {
@@ -214,7 +267,7 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
   it('only opens the cart when the subsequent actual transcript clearly requests it', async () => {
     execute.mockResolvedValue(confirmed(1));
     const result = await service.ask('Open my cart.', { ...context, modality: 'voice' });
-    expect(result.answer).toContain('Opened your merchant cart');
+    expect(result.answer).toContain('Opening your cart page');
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute).toHaveBeenCalledWith('open_cart', {}, expect.anything(), undefined, undefined);
   });
@@ -228,7 +281,7 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
   it.each(['Add this product to my cart.', 'Add to cart.', 'Add to cart this product.'])('executes a clear voice add request against the selected product: %s', async transcript => {
     execute.mockResolvedValue(confirmed(1));
     const result = await service.ask(transcript, { ...context, modality: 'voice' });
-    expect(result.answer).toContain('Added 1 unit of LASS HEALTH');
+    expect(result.answer).toContain('LASS HEALTH has been added');
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute).toHaveBeenCalledWith('add_to_cart', { productId, quantity: 1 }, expect.anything(), undefined, undefined);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -236,19 +289,19 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
   it.each(['Add it to my cart.', 'Add this one also.', 'Add this too.'])('resolves pronoun additions without a catalogue search: %s', async question => {
     execute.mockResolvedValue(confirmed(1));
     const result = await service.ask(question, context);
-    expect(result.answer).toContain('Added 1 unit');
+    expect(result.answer).toContain('has been added');
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute).toHaveBeenCalledWith('add_to_cart', { productId, quantity: 1 }, expect.anything(), undefined, undefined);
   });
   it('resolves a named addition with an exact catalogue match and preserves its requested identity', async () => {
     const other = { ...product, name: 'WEIZAP', externalProductId: 'weizap' };
     execute.mockResolvedValueOnce({ ok: true, data: { products: [product, other] } })
-      .mockResolvedValueOnce({ ok: true, data: { success: true, cart: {
+      .mockResolvedValueOnce({ ok: true, data: { ...confirmed(1).data, cart: {
         items: [{ productId, name: product.name, quantity: 1 }, { productId: 'weizap', name: 'WEIZAP', quantity: 1 }],
         itemCount: 2, total: 2000, currency: 'INR',
       } } });
     const result = await service.ask('Add WEIZAP also.', context);
-    expect(result.answer).toContain('Added 1 unit of WEIZAP');
+    expect(result.answer).toContain('WEIZAP has been added');
     expect(execute).toHaveBeenNthCalledWith(1, 'search_products', { query: 'WEIZAP' }, expect.anything(), undefined, undefined);
     expect(execute).toHaveBeenNthCalledWith(2, 'add_to_cart', { productId: 'weizap', quantity: 1 }, expect.anything(), undefined, undefined);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -265,7 +318,7 @@ describe('merchant shopping intent routing (mocked executor, not live cart accep
     expect((await service.ask('Add UNKNOWN also.', context)).answer).toContain('Nothing has been changed');
     execute.mockResolvedValueOnce({ ok: true, data: { products: [product] } }).mockResolvedValueOnce(confirmed(1));
     const result = await service.ask('LASS HEALTH', context);
-    expect(result.answer).toContain('Added 1 unit of LASS HEALTH');
+    expect(result.answer).toContain('LASS HEALTH has been added');
     expect(execute).toHaveBeenLastCalledWith('add_to_cart', { productId, quantity: 1 }, expect.anything(), undefined, undefined);
     expect(fetchSpy).not.toHaveBeenCalled();
   });

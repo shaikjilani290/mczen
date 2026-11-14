@@ -177,6 +177,21 @@ describe('WidgetService public access', () => {
     repository.findForTenant.mockResolvedValueOnce({ tenantId: tenantA, settings: settings({ allowedOrigins: [] }) });
     await expect(service.ask(sessionToken, origin, 'hi', undefined)).rejects.toBeInstanceOf(ForbiddenException);
   });
+  it('preserves verified cart navigation in public text responses', async () => {
+    const { service, agent } = build();
+    const { sessionToken } = await service.createSession(KEY, origin, undefined, 'p');
+    const navigationAction = { id: 'a'.repeat(64), type: 'OPEN_CHECKOUT', url: `${origin}/checkout`, merchantOrigin: origin };
+    const cartOperation = {
+      operation: 'add_to_cart', productId: 'zenage', productName: 'ZENAGE', quantity: 1,
+      cartVerified: true, cartUrl: `${origin}/cart`, checkoutUrl: navigationAction.url, navigationAction,
+    };
+    agent.ask.mockImplementation(async () => ({
+      success: true, answer: 'ZENAGE has been added to your cart.', model: 'verified-cart', toolCalls: [], sources: [],
+      cartOperation, navigationAction,
+    }));
+    const result = await service.ask(sessionToken, origin, 'Add ZENAGE to my cart.', 'en');
+    expect(result).toMatchObject({ success: true, cartVerified: true, cartOperation, navigationAction });
+  });
   it('never lets a session reach another tenant (tenant is fixed by the signed token)', async () => {
     const { service, repository, agent } = build();
     const { sessionToken } = await service.createSession(KEY, origin, undefined, 'p');
