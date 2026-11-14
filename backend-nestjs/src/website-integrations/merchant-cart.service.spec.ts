@@ -50,7 +50,9 @@ describe('merchant guest cart coordination (mocked catalogue and merchant read-b
       const controller = new AbortController();
       const executing = cart.execute('add_to_cart', { productId: 'tea', quantity: 1 }, context, controller.signal).catch(() => undefined);
       const action = await pending(snapshot);
-      expect(action.expectedQuantity).toBe(3);
+      expect(action).toEqual({
+        id: expect.any(String), operation: 'add_to_cart', productId: 'tea', quantity: 1,
+      });
       await expect(cart.complete(tenantId, binding, { id: action.id, success: true, cart: snapshot })).rejects.toThrow('requested change');
       controller.abort();
       await executing;

@@ -91,7 +91,15 @@ export class MerchantCartService {
         { currentProductId: body.selectedProductId as string, currentProductName: '' });
     }
     const pending = await this.store.get(`${scope}:pending`);
-    return { action: pending ? JSON.parse(pending) as CartAction : null };
+    if (!pending) return { action: null };
+    const action = JSON.parse(pending) as CartAction;
+    return { action: {
+      id: action.id,
+      operation: action.operation,
+      ...(action.productId !== undefined ? { productId: action.productId } : {}),
+      ...(action.variantId !== undefined ? { variantId: action.variantId } : {}),
+      ...(action.quantity !== undefined ? { quantity: action.quantity } : {}),
+    } };
   }
 
   async remember(context: AgentExecutionContext, ids: string[], select = true) {
