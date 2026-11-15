@@ -2,8 +2,17 @@ export type ShoppingIntent = 'PRODUCT_SEARCH' | 'PRODUCT_DETAILS' | 'PRODUCT_COM
   'ADD_TO_CART' | 'REMOVE_FROM_CART' | 'UPDATE_CART_QUANTITY' | 'VIEW_CART' |
   'CHECKOUT' | 'PRODUCT_FOLLOW_UP' | 'GENERAL_CONVERSATION';
 
-const localizedDetail = /గురించి|వివరాలు|చ[ెే]ప్పండ[ిీ]|చెప్పు|పదార్థాలు|ప్రయోజనాలు|ఎలా పనిచేస్తుంది|के बारे में|बताइए|बताएं|बताओ|बोलिये|बोलिए|जानकारी|सामग्री|फ़ायदे|फायदे|\b(?:gurinchi|chepandi|cheppandi|cheppu|bataiye|bataye|batao|boliye|jaankari)\b/iu;
+const localizedDetail = /గురించ[ిే]|వివరాలు|చ[ెే]ప్పండ[ిీే]|చెప్పు|పదార్థాలు|ప్రయోజనాలు|ఎలా పనిచేస్తుంది|के बारे में|बताइए|बताएं|बताओ|बोलिये|बोलिए|जानकारी|सामग्री|फ़ायदे|फायदे|\b(?:gurinchi|chepandi|cheppandi|cheppu|bataiye|bataye|batao|boliye|jaankari)\b/iu;
 const localizedReference = /దాని|దీని|ఇందులో|इसके|इसकी|इसमें|\b(?:dani|deeni|indulo|iske|iski|ismein)\b/iu;
+
+export function isProductInformationRequest(question: string): boolean {
+  return /గురించ[ిే]|చ[ెే]ప్పండ[ిీే]|के बारे में|बताइए|बताओ|\b(?:tell me about|explain|gurinchi|chepandi|cheppandi|bataiye)\b/iu.test(question);
+}
+
+export function isGeneralInformationRequest(question: string): boolean {
+  return /\b(?:products|polic(?:y|ies)|prices?|pricing|shipping|returns?|refunds?|delivery|tips|wellness|mczen)\b|उत्पादों|उत्पाद|नीति|वापसी|शिपिंग|सुझाव|ఉత్పత్తుల|ఉత్పత్తులు|విధానం|రిటర్న్|షిప్పింగ్|చిట్కాలు/iu.test(question) ||
+    /\bexplain\s+how\s+to\s+use\s+(?:this|that|it)\b/iu.test(question);
+}
 
 export function shoppingIntent(question: string): ShoppingIntent {
   if (/(?:कार्ट|కార్ట్)/u.test(question)) {
@@ -21,6 +30,10 @@ export function shoppingIntent(question: string): ShoppingIntent {
   if (/\b(update|set|change|increase|decrease)\b/i.test(question) && /\b(quantity|units?|items?|to)\b/i.test(question)) return 'UPDATE_CART_QUANTITY';
   if (/\b(add|buy)\b/i.test(question)) return 'ADD_TO_CART';
   if (/\b(cart|basket)\b/i.test(question)) return 'VIEW_CART';
+  if (isProductInformationRequest(question) && isGeneralInformationRequest(question)) {
+    return /\bproducts\b|उत्पादों|उत्पाद|ఉత్పత్తుల|ఉత్పత్తులు/iu.test(question)
+      ? 'PRODUCT_SEARCH' : 'GENERAL_CONVERSATION';
+  }
   if (localizedDetail.test(question)) {
     return localizedReference.test(question) || !productQuery(question) ? 'PRODUCT_FOLLOW_UP' : 'PRODUCT_DETAILS';
   }
@@ -44,7 +57,7 @@ export function shoppingIntent(question: string): ShoppingIntent {
 }
 
 export function productQuery(question: string): string {
-  return question.replace(/(?:के बारे में|बताइए|बताएं|बताओ|बोलिये|बोलिए|जानकारी|सामग्री|फ़ायदे|फायदे|इसके|इसकी|इसमें|గురించి|వివరాలు|చ[ెే]ప్పండ[ిీ]|చెప్పు|పదార్థాలు|ప్రయోజనాలు|దాని|దీని|ఇందులో|ఏమిటి|ఏంటి|ఏమి|ఎలా పనిచేస్తుంది)/gu, ' ')
+  return question.replace(/(?:के बारे में|बताइए|बताएं|बताओ|बोलिये|बोलिए|जानकारी|सामग्री|फ़ायदे|फायदे|इसके|इसकी|इसमें|గురించ[ిే]|వివరాలు|చ[ెే]ప్పండ[ిీే]|చెప్పు|పదార్థాలు|ప్రయోజనాలు|దాని|దీని|ఇందులో|ఏమిటి|ఏంటి|ఏమి|ఎలా పనిచేస్తుంది)/gu, ' ')
     .replace(/\b(?:gurinchi|chepandi|cheppandi|cheppu|bataiye|bataye|batao|boliye|jaankari|ke bare mein|dani|deeni|indulo|iske|iski|ismein)\b/gi, ' ')
     .replace(/(?:मेरे|मेरी|कार्ट|में|जोड़ दीजिए|जोड़ दें|जोड़ो|जोड़ें|जोड़|डाल दें|डालो|हटाओ|हटा दें|कृपया|నాకు|నా|కార్ట్‌లో|కార్ట్లో|కార్ట్|జోడించండి|జోడించు|చేర్చండి|చేర్చు|దయచేసి|తొలగించండి)/gu, ' ')
     .replace(/\b(what|s|are|is|the|a|an|main|all|full|complete|detailed|everything|need|want|give|me|my|please|show|tell|explain(?:s|ing)?|describe|details?|explanations?|descriptions?|about|of|for|in|inside|and|more|how|do|i|can|should|to|use|take|products?|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?|side|effects|price|add|buy|remove|delete|cart|basket|also|too|one|units?|items?|quantity|update|set|change|increase|decrease)\b/gi, ' ')

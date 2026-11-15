@@ -61,6 +61,8 @@ export interface VoiceSession {
   audioQueue: Array<{ payload: Buffer; epoch: number; sequence: number; receivedAt: number }>;
   flowPaused?: boolean;
   vadMs?: number;
+  turnVadMs?: number;
+  recentOverflowTimes?: number[];
   audioProcessing: boolean;
   currentAudioBytes: number;
   pendingAudioBytes: number;
