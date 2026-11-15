@@ -1044,11 +1044,13 @@ export class AgentService {
 
     const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
 
+    let multilingualRecoveryAttempted = false;
+    let multilingualRecoveryFailure: string | undefined;
     // 4. Ollama agent execution loop.
     for (let round = 0; round < maxRounds; round++) {
       // The final request is included in the round ceiling, not an extra call.
       const finalAnswerOnly =
-        merchantEvidenceReady || generalWellness || clarifyGoals ||
+        multilingualRecoveryAttempted || merchantEvidenceReady || generalWellness || clarifyGoals ||
         (conversational && /^(?:hello|hi|hey)(?:\s+mczen)?[!., ]*$/i.test(question.trim())) ||
         round === maxRounds - 1 || totalToolCalls >= maxToolCalls;
       const limitCode: RuntimeErrorCode =
@@ -1092,9 +1094,9 @@ export class AgentService {
             : 'OLLAMA_INVALID_RESPONSE';
         this.traceFailure(context.requestId, code);
         return respond(false,
-          finalAnswerOnly && !merchantEvidenceReady && executedTools.length > 0
+          multilingualRecoveryFailure ?? (finalAnswerOnly && !merchantEvidenceReady && executedTools.length > 0
             ? RUNTIME_ERRORS[limitCode]
-            : RUNTIME_ERRORS[code],
+            : RUNTIME_ERRORS[code]),
         );
       }
 
@@ -1103,7 +1105,32 @@ export class AgentService {
       // 5. Return the final answer when no more tools are requested.
       if (requestedCalls.length === 0) {
         let answer = assistantMessage.content.trim();
-        if (hasRepetitiveText(answer)) {
+        const languageScript = responseLanguage === 'te' ? /\p{Script=Telugu}/u
+          : responseLanguage === 'hi' ? /\p{Script=Devanagari}/u : undefined;
+        const repetitive = hasRepetitiveText(answer);
+        const wrongLanguage = Boolean(answer && languageScript && !languageScript.test(answer));
+        if (languageScript && (repetitive || wrongLanguage) && !multilingualRecoveryAttempted &&
+            round + 1 < maxRounds) {
+          options.signal?.throwIfAborted();
+          multilingualRecoveryAttempted = true;
+          multilingualRecoveryFailure = responseLanguage === 'te'
+            ? 'క్షమించండి, తెలుగులో సరైన సమాధానం రూపొందించలేకపోయాను. దయచేసి మళ్లీ ప్రయత్నించండి.'
+            : 'क्षमा करें, हिंदी में सही उत्तर तैयार नहीं हो सका। कृपया फिर से प्रयास करें।';
+          this.logger.warn({
+            event: repetitive ? 'assistant_repetitive_response_rejected' : 'assistant_response_language_rejected',
+            requestId: context.requestId, requestedLanguage: responseLanguage, answerChars: answer.length,
+          });
+          this.logger.warn({
+            event: 'assistant_multilingual_recovery', requestId: context.requestId,
+            requestedLanguage: responseLanguage, reason: repetitive ? 'repetitive' : 'wrong_language',
+          });
+          messages.push({
+            role: 'system',
+            content: `${languageInstruction}\nThe previous draft failed the output quality check. Write a fresh, concise answer in at most 60 words and three short sentences. Use only facts already supplied for the current question. Do not repeat words, phrases or lists. Keep catalogue names unchanged. Preserve relevant safety qualifications. If the requested facts are absent, say so in the requested language. Do not call tools, invent facts or claim any new shopping operation.`,
+          });
+          continue;
+        }
+        if (repetitive) {
           this.logger.warn({ event: 'assistant_repetitive_response_rejected', requestId: context.requestId,
             requestedLanguage: responseLanguage, answerChars: answer.length });
           return respond(false, responseLanguage === 'te'
@@ -1112,9 +1139,7 @@ export class AgentService {
               ? 'क्षमा करें, सही उत्तर तैयार नहीं हो सका। कृपया फिर से प्रयास करें।'
               : 'I could not prepare a reliable answer. Please try again.');
         }
-        const languageScript = responseLanguage === 'te' ? /\p{Script=Telugu}/u
-          : responseLanguage === 'hi' ? /\p{Script=Devanagari}/u : undefined;
-        if (answer && languageScript && !languageScript.test(answer)) {
+        if (wrongLanguage) {
           this.logger.warn({ event: 'assistant_response_language_rejected', requestId: context.requestId,
             requestedLanguage: responseLanguage, answerChars: answer.length });
           return respond(false, responseLanguage === 'te'
@@ -1133,13 +1158,13 @@ export class AgentService {
           answer += `\n\n${clinicalQualification}`;
         }
         if (!answer) this.traceFailure(context.requestId, 'OLLAMA_EMPTY_RESPONSE');
-        return respond(Boolean(answer), answer || RUNTIME_ERRORS.OLLAMA_EMPTY_RESPONSE);
+        return respond(Boolean(answer), answer || multilingualRecoveryFailure || RUNTIME_ERRORS.OLLAMA_EMPTY_RESPONSE);
       }
 
       // Models can still request tools after they are removed. Never execute them.
       if (finalAnswerOnly) {
         this.traceFailure(context.requestId, limitCode);
-        return respond(false, RUNTIME_ERRORS[limitCode]);
+        return respond(false, multilingualRecoveryFailure ?? RUNTIME_ERRORS[limitCode]);
       }
 
       const remainingCalls = maxToolCalls - totalToolCalls;
