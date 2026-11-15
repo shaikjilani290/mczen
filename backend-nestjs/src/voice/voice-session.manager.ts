@@ -1,5 +1,5 @@
 import { ForbiddenException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { ProductIdentityService, productMentions } from '../website-integrations/product-identity.service';
+import { ProductIdentityService, canonicalizeProductNames, productMentions } from '../website-integrations/product-identity.service';
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { getHeapStatistics } from 'node:v8';
@@ -374,12 +374,27 @@ export class VoiceSessionManager {
       return;
     }
     if (event.type === 'voice.audio.end') {
+      const epoch = session.epoch;
       // The marker follows binary packets on the socket, but VAD drains asynchronously.
-      void session.processing.then(() => this.runInTenant(session, () => this.finalizeUtterance(session, 'client_end')))
+      void session.processing.then(() => session.epoch === epoch
+        ? this.runInTenant(session, () => this.finalizeUtterance(session, 'client_end')) : undefined)
         .catch(() => this.pipelineFailure(session, new Error('Audio end processing failed.')));
       return;
     }
     if (event.type === 'voice.assistant.interrupt') {
+      if (dataObject.reason === 'capture_overflow') {
+        if (dataObject.epoch === session.epoch) await this.recoverOverflow(session, 'browser_capture');
+        return;
+      }
+      if (dataObject.reason === 'capture_hidden') {
+        if (dataObject.epoch === session.epoch) {
+          this.logger.log({ event: 'voice_audio_pause', sessionId: session.id, turnId: session.timing?.turnId,
+            epoch: session.epoch, reason: 'capture_hidden', queueBytes: session.pendingAudioBytes,
+            queueDepth: session.audioQueue.length });
+          await this.resetTurn(session, 'recovered');
+        }
+        return;
+      }
       await this.interrupt(session, 'client_interrupt');
       return;
     }
@@ -441,15 +456,17 @@ export class VoiceSessionManager {
     }
     this.ingressWindowBytes += frame.payload.length;
     if (this.ingressWindowBytes > MAX_GLOBAL_INGRESS_BYTES_PER_SECOND) {
+      this.logger.warn({ event: 'voice_audio_overflow', sessionId: session.id, epoch: session.epoch,
+        reason: 'ingress_backpressure', queueBytes: session.pendingAudioBytes });
       this.sendError(session, 'INGRESS_BACKPRESSURE',
         'Audio could not be accepted because the voice service is busy. Voice stopped to avoid incomplete transcription.', false);
       void this.closeSession(session, 'ingress_backpressure');
       return;
     }
     if (session.pendingAudioBytes + frame.payload.length > 64_000) {
-      this.sendError(session, 'AUDIO_QUEUE_OVERFLOW',
-        'The audio processing queue exceeded 2 seconds. Voice stopped to avoid incomplete transcription.', false);
-      void this.closeSession(session, 'audio_queue_overflow');
+      this.logger.warn({ event: 'voice_audio_overflow', sessionId: session.id, epoch: session.epoch,
+        reason: 'server_queue', queueBytes: session.pendingAudioBytes, incomingBytes: frame.payload.length });
+      void this.recoverOverflow(session, 'server_queue');
       return;
     }
     session.audioBytes += frame.payload.length;
@@ -460,7 +477,11 @@ export class VoiceSessionManager {
     this.armIdleTimer(session);
     if (session.pendingAudioBytes >= 16_000 && !session.flowPaused) {
       session.flowPaused = true;
-      this.sendEvent(socket, 'voice.audio.flow', { paused: true, queueMs: session.pendingAudioBytes / 32 }, session);
+      this.logger.log({ event: 'voice_audio_pause', sessionId: session.id, turnId: session.timing?.turnId,
+        epoch: session.epoch, reason: 'queue_high_water', queueBytes: session.pendingAudioBytes,
+        queueDepth: session.audioQueue.length, queueMs: session.pendingAudioBytes / 32 });
+      this.sendEvent(socket, 'voice.audio.flow', { paused: true, queueMs: session.pendingAudioBytes / 32,
+        reason: 'queue_high_water' }, session);
     }
     this.drainAudio(session);
   }
@@ -504,6 +525,7 @@ export class VoiceSessionManager {
         while (session.audioQueue.length > 0 && session.state !== 'closed') {
           const frame = session.audioQueue.shift()!;
           const started = performance.now();
+          session.vadMs = 0;
           try {
             if (frame.epoch === session.epoch) {
               await this.runInTenant(session, () => this.consumeAudio(session, frame.payload, frame.sequence));
@@ -617,22 +639,39 @@ export class VoiceSessionManager {
         : undefined;
       if (session.epoch !== epoch || controller.signal.aborted) return;
     } finally {
+      if (complete.length && this.vad.detectBatch && session.epoch === epoch) {
+        session.vadMs = performance.now() - started;
+        session.turnVadMs = (session.turnVadMs ?? 0) + session.vadMs;
+      }
       if (session.vadAbort === controller) session.vadAbort = undefined;
     }
     if (batch && batch.length !== length / FRAME_BYTES) throw new Error('Invalid VAD batch length.');
-    session.vadMs = batch ? performance.now() - started : 0;
     for (let offset = 0; offset < length; offset += FRAME_BYTES) {
         if (session.epoch !== epoch || session.state === 'closed') return;
         const vadFrame = complete.subarray(offset, offset + FRAME_BYTES);
         session.listenMs += 20;
         const controller = new AbortController();
         const vadStarted = performance.now();
-        const result = batch?.[offset / FRAME_BYTES] ?? await this.vad.detect({
-          streamId: session.id,
-          audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: vadFrame },
-          signal: controller.signal,
-        });
-        if (!batch) session.vadMs += performance.now() - vadStarted;
+        let result: VadResult;
+        if (batch) {
+          result = batch[offset / FRAME_BYTES];
+        } else {
+          session.vadAbort = controller;
+          try {
+            result = await this.vad.detect({
+              streamId: session.id,
+              audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: vadFrame },
+              signal: controller.signal,
+            });
+          } finally {
+            if (session.epoch === epoch) {
+              const vadMs = performance.now() - vadStarted;
+              session.vadMs = (session.vadMs ?? 0) + vadMs;
+              session.turnVadMs = (session.turnVadMs ?? 0) + vadMs;
+            }
+            if (session.vadAbort === controller) session.vadAbort = undefined;
+          }
+        }
         if (session.epoch !== epoch) return;
         const speech = result.speech && result.probability >= session.context.settings.vadSensitivity;
         if (!speech || session.state !== 'speaking') session.bargeInSpeechMs = 0;
@@ -744,6 +783,7 @@ export class VoiceSessionManager {
     if (session.state !== 'detecting_end_of_speech' || session.speechMs < session.context.settings.minSpeechMs ||
         session.currentAudioBytes === 0) return;
     const epoch = session.epoch;
+    const audio = Buffer.concat(session.currentAudio);
     const buffering = {
       preRollMs: session.timing?.preRollMs,
       trailingSilenceMs: session.silenceMs,
@@ -755,7 +795,7 @@ export class VoiceSessionManager {
     this.sendEvent(session.socket, 'voice.assistant.thinking', { hint: 'transcribing' }, session);
     await this.persistState(session);
     await this.recordEvent(session, 'endpoint_detected', reason);
-    const audio = Buffer.concat(session.currentAudio);
+    if (session.epoch !== epoch || session.state !== 'transcribing') return;
     let diagnosticMetadata: { ingress: ReturnType<PcmDiagnostics['snapshot']>; finalStt: ReturnType<PcmDiagnostics['snapshot']> } | undefined;
     if (session.audioDiagnostics) {
       const segmented = new PcmDiagnostics();
@@ -776,6 +816,7 @@ export class VoiceSessionManager {
     const timing = session.timing;
     try {
       const vocabulary = await this.productIdentity?.vocabulary(session.context.agent) ?? [];
+      if (session.epoch !== epoch || session.state !== 'transcribing' || controller.signal.aborted) return;
       const result = await this.stt.transcribe({
         audio: { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, data: audio },
         language: session.context.language === 'auto'
@@ -791,7 +832,7 @@ export class VoiceSessionManager {
         await this.recordEvent(session, 'late_agent_response_discarded', 'stale_transcription');
         return;
       }
-      const text = normalizeTranscript(result.text, 2000);
+      let text = normalizeTranscript(result.text, 2000);
       this.logger.debug({
         event: 'voice_product_transcript', requestId: session.timing?.turnId,
         audioBytes: audio.length, audioMs: audio.length / 32,
@@ -818,6 +859,7 @@ export class VoiceSessionManager {
         await this.resetTurn(session, 'recovered');
         return;
       }
+      text = canonicalizeProductNames(text, vocabulary);
       if (session.context.language === 'auto' && result.recognitionQuality?.reliable === true &&
           (result.languageProbability === undefined || result.languageProbability >= 0.8) &&
           session.context.allowedLanguages.includes(result.language)) {
@@ -1227,6 +1269,17 @@ export class VoiceSessionManager {
   }
 
   private async resetTurn(session: VoiceSession, reason: 'turn_reset' | 'recovered'): Promise<void> {
+    this.logger.log({ event: 'voice_turn_vad_timing', sessionId: session.id,
+      turnId: session.timing?.turnId, epoch: session.epoch, vadMs: session.turnVadMs ?? 0, reason });
+    session.turnVadMs = 0;
+    if (reason === 'recovered') {
+      session.sttAbort?.abort();
+      session.turnAbort?.abort();
+      session.ttsAbort?.abort();
+      session.audioQueue = [];
+      session.pendingAudioBytes = 0;
+      session.flowPaused = false;
+    }
     session.partialAbort?.abort();
     session.vadAbort?.abort();
     session.currentAudio = [];
@@ -1246,6 +1299,28 @@ export class VoiceSessionManager {
     session.incomingSequence = undefined;
     this.sendEvent(session.socket, 'voice.assistant.epoch', { epoch: session.epoch, reason }, session);
     await this.persistState(session);
+  }
+
+  private async recoverOverflow(session: VoiceSession, reason: 'server_queue' | 'browser_capture'): Promise<void> {
+    if (session.state === 'closed') return;
+    const now = Date.now();
+    session.recentOverflowTimes = (session.recentOverflowTimes ?? []).filter(time => now - time < 30_000);
+    session.recentOverflowTimes.push(now);
+    const repeated = session.recentOverflowTimes.length >= 3;
+    this.logger.warn({ event: 'voice_audio_overflow_recovery', sessionId: session.id,
+      epoch: session.epoch, turnId: session.timing?.turnId, reason,
+      queueBytes: session.pendingAudioBytes, overflowCount: session.recentOverflowTimes.length, closing: repeated });
+    const language = session.context.language === 'auto' ? session.context.defaultLanguage : session.context.language;
+    const message = language === 'te' ? 'మీ మాట వినలేకపోయాను. దయచేసి మళ్లీ చెప్పండి.'
+      : language === 'hi' ? 'आपकी बात सुन नहीं पाया। कृपया फिर से कहें।'
+        : 'I missed that, please say it again.';
+    this.sendError(session, 'AUDIO_QUEUE_OVERFLOW', message, !repeated);
+    if (repeated) {
+      await this.closeSession(session, 'audio_queue_overflow');
+      session.socket?.close(4413, 'AUDIO_QUEUE_OVERFLOW');
+      return;
+    }
+    await this.resetTurn(session, 'recovered');
   }
 
   private async pipelineFailure(session: VoiceSession, error: unknown): Promise<void> {

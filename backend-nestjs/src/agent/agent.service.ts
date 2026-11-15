@@ -25,9 +25,9 @@ import { ConversationsService } from '../conversations/conversations.service';
 import { hasRepetitiveText } from '../common/text/repetitive-text';
 import type { ConversationToolTrace } from '../conversations/conversations.repository';
 import { MerchantCartService, type VerifiedCartOperation } from '../website-integrations/merchant-cart.service';
-import { productQuery, shoppingIntent } from './shopping-intent';
+import { isGeneralInformationRequest, isProductInformationRequest, productQuery, shoppingIntent } from './shopping-intent';
 import { readStreamedAnswer } from './providers/streamed-answer';
-import { ProductIdentityService, normalizeProductName, productMentions, type ProductIdentity } from '../website-integrations/product-identity.service';
+import { ProductIdentityService, canonicalizeProductNames, normalizeProductName, productMentions, resolveProduct, type ProductIdentity } from '../website-integrations/product-identity.service';
 import { WebsiteKnowledgeEngine } from '../website-integrations/website-knowledge.engine';
 
 export interface AgentTurnOptions {
@@ -243,15 +243,25 @@ export class AgentService {
     const clarifyGoals = conversational && /\b(?:suitable|recommend|best|right)\b.*\b(?:my|me|goals)\b/i.test(question);
     let intent = shoppingIntent(question);
     const priorShopping = context.merchant && this.merchantCart ? await this.merchantCart.shoppingContext(context) : undefined;
-    if (priorShopping?.pendingClarification && intent === 'GENERAL_CONVERSATION') {
+    if (priorShopping?.pendingClarification && intent === 'GENERAL_CONVERSATION' && !isGeneralInformationRequest(question)) {
       const pendingIntent = priorShopping.lastIntent;
       if (pendingIntent === 'PRODUCT_DETAILS' || pendingIntent === 'ADD_TO_CART' ||
           pendingIntent === 'REMOVE_FROM_CART' || pendingIntent === 'UPDATE_CART_QUANTITY') {
         intent = pendingIntent;
       }
     }
-    const vocabulary = ['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP', 'ADD_TO_CART', 'REMOVE_FROM_CART', 'UPDATE_CART_QUANTITY'].includes(intent)
+    const informationPattern = isProductInformationRequest(question);
+    const vocabulary = (informationPattern ||
+      ['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP', 'ADD_TO_CART', 'REMOVE_FROM_CART', 'UPDATE_CART_QUANTITY'].includes(intent))
       ? await this.productIdentity?.vocabulary(context) ?? [] : [];
+    question = canonicalizeProductNames(question, vocabulary);
+    const generalInquiry = isGeneralInformationRequest(question) && productMentions(question, vocabulary).length === 0 &&
+      (!/\b(?:it|its|this|that)\b|దాని|దీని|ఇందులో|इसके|इसकी|इसमें/iu.test(question) ||
+        /\bexplain\s+how\s+to\s+use\s+(?:this|that|it)\b/iu.test(question));
+    const informationRequest = informationPattern && !generalInquiry &&
+      !/\b(?:it|its|this|that)\b|దాని|దీని|ఇందులో|इसके|इसकी|इसमें/iu.test(question) &&
+      ['GENERAL_CONVERSATION', 'PRODUCT_SEARCH', 'PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP'].includes(intent);
+    if (informationRequest) intent = 'PRODUCT_DETAILS';
     let pinnedProduct: ProductIdentity | undefined;
     const wrongProductAnswer = (text: string) => pinnedProduct !== undefined && (
       productMentions(text, vocabulary).some(product => product.externalProductId !== pinnedProduct!.externalProductId) ||
@@ -305,6 +315,7 @@ export class AgentService {
         answer = 'I could not verify that answer for the selected product. Please repeat the exact product name.';
         products.length = 0;
       }
+      if (success) answer = canonicalizeProductNames(answer, vocabulary);
       if (products.length && this.merchantCart) {
         await this.merchantCart.remember(context, products.map(product => product.externalProductId), false);
         if (['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP'].includes(intent) && products.length === 1) {
@@ -375,8 +386,8 @@ export class AgentService {
         matchMode: 'exact-normalized', clarificationRequired: named.length !== 1 });
       return { result, named };
     };
-    const detailTopic = (intent === 'PRODUCT_DETAILS' && !/\bprice\b/i.test(question)) || intent === 'PRODUCT_FOLLOW_UP' ||
-      /\b(details?|explanations?|descriptions?|explain(?:s|ing)?|describe|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?)\b|side effects|what(?:'s| is) inside|how (?:do i |should i |to )use/i.test(question);
+    const detailTopic = !generalInquiry && ((intent === 'PRODUCT_DETAILS' && !/\bprice\b/i.test(question)) || intent === 'PRODUCT_FOLLOW_UP' ||
+      /\b(details?|explanations?|descriptions?|explain(?:s|ing)?|describe|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?)\b|side effects|what(?:'s| is) inside|how (?:do i |should i |to )use/i.test(question));
     const fullProductExplanation = detailTopic && /\b(full|complete|detailed|everything|all)\b/i.test(question);
     const priceOnly = /\bprice\b/i.test(question) && !detailTopic && !/\b(about|details|explain|describe)\b/i.test(question);
     if (context.merchant && this.merchantCart && !this.isUrgentSymptomQuestion(question)) {
@@ -400,17 +411,28 @@ export class AgentService {
       }
       const cartIntent = ['ADD_TO_CART', 'REMOVE_FROM_CART', 'UPDATE_CART_QUANTITY', 'VIEW_CART'].includes(intent);
       const explicitProducts = productMentions(question, vocabulary);
-      const namedDetails = explicitProducts.length > 0 || (intent === 'PRODUCT_DETAILS' && !/\b(this|that|it|its|selected|first|second|third)\b/i.test(question) &&
+      const namedDetails = !generalInquiry && (informationRequest || explicitProducts.length > 0 || (intent === 'PRODUCT_DETAILS' && !/\b(this|that|it|its|selected|first|second|third)\b/i.test(question) &&
         question.replace(/\b(what|s|are|is|the|a|an|main|all|full|complete|detailed|everything|need|want|give|me|my|please|show|tell|explain|describe|details?|explanations?|descriptions?|about|of|for|in|inside|and|more|how|do|i|can|should|to|use|take|products?|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?|side|effects)\b/gi, '')
-          .replace(/[\s?!.,']/g, '').length > 0);
+          .replace(/[\s?!.,']/g, '').length > 0));
       if (!cartIntent && namedDetails) {
         const name = explicitProducts.length === 1 ? explicitProducts[0].name : productQuery(question);
         let matches: readonly ProductIdentity[];
         if (this.productIdentity) {
-          matches = vocabulary.filter(product => normalizeProductName(product.name) === normalizeProductName(name));
+          const confirmedName = priorShopping?.pendingClarification &&
+            /^(?:yes|हाँ|हां|అవును)[.!?।]*$/iu.test(question.trim()) ? priorShopping.pendingClarification : undefined;
+          const resolution = resolveProduct(confirmedName ?? question, vocabulary);
+          matches = resolution.status === 'resolved' ? resolution.candidates : [];
           this.logger.log({ event: 'product_identity_match', requestId: context.requestId, modality: context.modality,
-            intent, vocabularyCount: vocabulary.length, candidateCount: matches.length,
-            matchedProducts: matches, matchMode: 'exact-normalized', clarificationRequired: matches.length !== 1 });
+            intent, vocabularyCount: vocabulary.length, candidateCount: resolution.candidates.length,
+            matchedProducts: matches, matchMode: 'window-edit-distance', score: resolution.score,
+            clarificationRequired: matches.length !== 1 });
+          if (resolution.status === 'clarify' && resolution.candidates.length === 1) {
+            const candidate = resolution.candidates[0];
+            await this.merchantCart.updateShoppingContext(context, { pendingClarification: candidate.name });
+            return respond(true, responseLanguage === 'te' ? `మీరు ${candidate.name} గురించి అడుగుతున్నారా?`
+              : responseLanguage === 'hi' ? `क्या आपका मतलब ${candidate.name} है?`
+                : `Did you mean ${candidate.name}?`, 'verified-catalogue');
+          }
         } else {
           const found = await lookupProduct(name);
           if (!found.result.ok) return respond(false, found.result.error.message, 'verified-catalogue');
@@ -418,6 +440,13 @@ export class AgentService {
         }
         if (matches.length !== 1) {
           await this.merchantCart.updateShoppingContext(context, { pendingClarification: name });
+          if (informationRequest && (this.productIdentity || !name)) {
+            return respond(true, responseLanguage === 'te'
+              ? 'మీరు ఏ ఉత్పత్తి గురించి అడుగుతున్నారు? దయచేసి పేరును స్పష్టంగా చెప్పండి లేదా టైప్ చేయండి.'
+              : responseLanguage === 'hi'
+                ? 'आप किस उत्पाद के बारे में पूछ रहे हैं? कृपया नाम स्पष्ट रूप से बोलें या टाइप करें।'
+                : 'Which product are you asking about? Please say the name clearly or type it.', 'verified-catalogue');
+          }
           return respond(true, responseLanguage === 'te'
             ? `మీరు ఏ ఉత్పత్తి గురించి అడుగుతున్నారు? "${name}" పేరుతో ఒకే ఉత్పత్తిని గుర్తించలేకపోయాను. దయచేసి ఉత్పత్తి పేరును స్పష్టంగా చెప్పండి లేదా టైప్ చేయండి.`
             : responseLanguage === 'hi'
@@ -445,7 +474,7 @@ export class AgentService {
         if (new Set(ids).size !== 2) return respond(true, 'Please choose two different products to compare.', 'verified-catalogue');
         contextualProductLookup = { name: 'compare_products', input: { externalProductIds: ids } };
       }
-      const referenceDetails = !cartIntent && !namedDetails && ((/\b(first|second|third|this|selected|its|it|more)\b/i.test(question) &&
+      const referenceDetails = !generalInquiry && !cartIntent && !namedDetails && ((/\b(first|second|third|this|selected|its|it|more)\b/i.test(question) &&
         (/\b(details|tell|about|price|explain|describe)\b/i.test(question) || detailTopic)) ||
         detailTopic || /^(?:what(?:'s| is)|tell me)\s+(?:the|its)\s+price[?.!]*$/i.test(question.trim()));
       if (cartIntent || referenceDetails) {
@@ -1053,7 +1082,7 @@ export class AgentService {
                 selectedProductId: pinnedProduct?.externalProductId });
               throw new AgentRuntimeError('OLLAMA_INVALID_RESPONSE');
             }
-            options.onText!(text);
+            options.onText!(canonicalizeProductNames(text, vocabulary));
           } : undefined },
         );
       } catch (error) {
