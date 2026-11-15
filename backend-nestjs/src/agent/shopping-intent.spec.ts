@@ -38,6 +38,17 @@ describe('shopping intent classification', () => {
   ])('routes %s as %s', (question, expected) => {
     expect(shoppingIntent(question)).toBe(expected);
   });
+  it.each(['చెప్పండి', 'చెప్పండీ', 'చేప్పండి', 'చేప్పండీ'])(
+    'strips the Telugu request word %s without guessing the product',
+    (request) => {
+      expect(productQuery(`చేనేజ్ గురించి ${request}.`)).toBe('చేనేజ్');
+      expect(productQuery(`ZENAGE గురించి ${request}.`)).toBe('ZENAGE');
+      expect(productQuery(`ZENAGE ${request}`)).toBe('ZENAGE');
+      expect(shoppingIntent(`ZENAGE ${request}`)).toBe('PRODUCT_DETAILS');
+      expect(shoppingIntent(request)).toBe('PRODUCT_FOLLOW_UP');
+      expect(productQuery(request)).toBe('');
+    },
+  );
   it('keeps internal product punctuation while stripping sentence punctuation', () => {
     expect(productQuery('Explain HALE.O.')).toBe('HALE.O');
     expect(productQuery('What are the ingredients in ZENAGE?')).toBe('ZENAGE');
