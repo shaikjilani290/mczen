@@ -413,6 +413,12 @@ describe('AgentService — hardened Ollama runtime (Ollama always mocked)', () =
     expect(rejected.answer).toMatch(language === 'te' ? /\p{Script=Telugu}/u : /\p{Script=Devanagari}/u);
     expect(onText).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(expect.objectContaining({ event: 'assistant_response_language_rejected' }));
+    queueCompatibleAssistant(language === 'te' ? 'పోషక ఉత్పత్తి కోసం '.repeat(25) : 'नियमित नुकसान सुविधा के लिए '.repeat(25));
+    const repetitive = await service.ask(question, context, { onText });
+    expect(repetitive.success).toBe(false);
+    expect(repetitive.answer.length).toBeLessThan(150);
+    expect(onText).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.objectContaining({ event: 'assistant_repetitive_response_rejected' }));
   });
 
   it.each(['ollama', 'openai-compatible'] as const)(

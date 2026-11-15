@@ -28,6 +28,15 @@ a misheard product name prompts clarification rather than selecting another item
 The model must itself support fluent Telugu/Hindi; prompt and script checks do not
 certify fluency or pronunciation. Newly added languages need matching supported
 STT/model/TTS capabilities; adding an admin language row alone is insufficient.
+Degenerate repeated STT text is rejected before publishing the final transcript
+or invoking shopping tools. Repeated generated answers are rejected before normal
+buffered conversational answers reach TTS. These checks do not repair semantic
+mistranslations or certify the configured model's Telugu/Hindi fluency.
+Microphone packets are acknowledged without VAD inference during transcription
+and model processing, when a new utterance cannot be accepted. Listening and
+configured speaking-time barge-in still run VAD. The 2-second overflow safety
+limit is unchanged; sustained listening-time VAD congestion still needs service
+capacity/latency investigation, not a larger buffer.
 
 Pass the existing merchant-owned `cartAdapter` to `McZEN.init()`. Its `execute`
 method must support `get_cart` as well as mutations and return the actual cart

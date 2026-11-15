@@ -22,6 +22,7 @@ import type {
   ToolExecutionResult,
 } from './tools/interfaces/tool-execution-result.interface';
 import { ConversationsService } from '../conversations/conversations.service';
+import { hasRepetitiveText } from '../common/text/repetitive-text';
 import type { ConversationToolTrace } from '../conversations/conversations.repository';
 import { MerchantCartService, type VerifiedCartOperation } from '../website-integrations/merchant-cart.service';
 import { productQuery, shoppingIntent } from './shopping-intent';
@@ -1073,6 +1074,15 @@ export class AgentService {
       // 5. Return the final answer when no more tools are requested.
       if (requestedCalls.length === 0) {
         let answer = assistantMessage.content.trim();
+        if (hasRepetitiveText(answer)) {
+          this.logger.warn({ event: 'assistant_repetitive_response_rejected', requestId: context.requestId,
+            requestedLanguage: responseLanguage, answerChars: answer.length });
+          return respond(false, responseLanguage === 'te'
+            ? 'క్షమించండి, సరైన సమాధానం రూపొందించలేకపోయాను. దయచేసి మళ్లీ ప్రయత్నించండి.'
+            : responseLanguage === 'hi'
+              ? 'क्षमा करें, सही उत्तर तैयार नहीं हो सका। कृपया फिर से प्रयास करें।'
+              : 'I could not prepare a reliable answer. Please try again.');
+        }
         const languageScript = responseLanguage === 'te' ? /\p{Script=Telugu}/u
           : responseLanguage === 'hi' ? /\p{Script=Devanagari}/u : undefined;
         if (answer && languageScript && !languageScript.test(answer)) {

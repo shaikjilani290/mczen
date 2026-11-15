@@ -31,6 +31,7 @@ describe('shopping intent classification', () => {
     ['ZENAGE గురించి చెప్పండి', 'PRODUCT_DETAILS'],
     ['zenage gurinchi chepandi', 'PRODUCT_DETAILS'],
     ['ZENAGE के बारे में बताइए', 'PRODUCT_DETAILS'],
+    ['ZENAGE के बारे में बोलिये', 'PRODUCT_DETAILS'],
     ['ZENAGE ke bare mein bataiye', 'PRODUCT_DETAILS'],
     ['దాని పదార్థాలు ఏమిటి?', 'PRODUCT_FOLLOW_UP'],
     ['इसकी सामग्री बताइए', 'PRODUCT_FOLLOW_UP'],

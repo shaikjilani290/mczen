@@ -6,6 +6,7 @@ import { getHeapStatistics } from 'node:v8';
 import { WebSocket } from 'ws';
 import { ConversationsService } from '../conversations/conversations.service';
 import { newUuidv7 } from '../common/ids/uuid';
+import { hasRepetitiveText } from '../common/text/repetitive-text';
 import { tenantContextStore, type TenantContext } from '../common/tenant/tenant-context.store';
 import type { AgentResponse } from '../agent/agent.service';
 import type { AgentInvocationPort } from './agent-invocation.port';
@@ -592,6 +593,11 @@ export class VoiceSessionManager {
   }
 
   private async consumeAudio(session: VoiceSession, payload: Buffer, sequence: number): Promise<void> {
+    if (session.state === 'transcribing' || session.state === 'thinking' ||
+        (session.state === 'speaking' && !session.context.settings.bargeInEnabled)) {
+      session.vadPending = Buffer.alloc(0);
+      return;
+    }
     const extended = session;
     let epoch = session.epoch;
     const combined = session.vadPending.length ? Buffer.concat([session.vadPending, payload]) : payload;
@@ -798,6 +804,18 @@ export class VoiceSessionManager {
       });
       if (!text) {
         await this.resetTurn(session, 'turn_reset');
+        return;
+      }
+      if (hasRepetitiveText(text)) {
+        this.logger.warn({ event: 'voice_repetitive_transcript_rejected', requestId: session.timing?.turnId,
+          requestedLanguage: session.context.language, detectedLanguage: result.language, transcriptChars: text.length });
+        const language = session.context.language === 'auto' ? result.language : session.context.language;
+        this.sendError(session, 'STT_UNAVAILABLE', language === 'te'
+          ? 'మాటలు స్పష్టంగా గుర్తించలేకపోయాను. దయచేసి మళ్లీ చెప్పండి లేదా టైప్ చేయండి.'
+          : language === 'hi'
+            ? 'आपकी बात स्पष्ट रूप से पहचान नहीं सका। कृपया दोबारा बोलें या टाइप करें।'
+            : 'I could not recognize that clearly. Please repeat or type your question.', true);
+        await this.resetTurn(session, 'recovered');
         return;
       }
       if (session.context.language === 'auto' && result.recognitionQuality?.reliable === true &&

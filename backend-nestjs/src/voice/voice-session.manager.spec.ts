@@ -714,8 +714,8 @@ describe('VoiceSessionManager', () => {
       expect(sentEvents.some((event) => event.type === 'voice.assistant.thinking' &&
         (event.data as Record<string, unknown>)?.hint === 'transcribing')).toBe(true);
       manager.handleBinary(socket, frame(39, 1, 1280));
-      await waitFor(() => calls === 80);
       await waitFor(() => sentEvents.filter((e) => e.type === 'voice.audio.ack').length === 40);
+      expect(calls).toBeLessThan(80);
       expect(sentEvents.filter((e) => e.type === 'voice.audio.ack')
         .map((e) => (e.data as Record<string, unknown>).sequence)).toEqual(Array.from({ length: 40 }, (_, i) => i));
       expect(sttTranscribe.mock.calls[0][0].audio.data.length).toBe(27 * 1280);
@@ -772,6 +772,47 @@ describe('VoiceSessionManager', () => {
     } finally {
       release();
     }
+  });
+
+  it('acknowledges audio without invoking VAD while the model is processing', async () => {
+    let release!: (response: AgentResponse) => void;
+    agentInvoke.mockImplementation(() => new Promise<AgentResponse>(resolve => { release = resolve; }));
+    await beginSession();
+    for (let index = 0; index < 11; index++) {
+      manager.handleBinary(socket, frame(index, 1, 3200));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
+    }
+    await waitFor(() => agentInvoke.mock.calls.length === 1);
+    const calls = vad.detect.mock.calls.length;
+    try {
+      for (let index = 11; index < 35; index++) {
+        manager.handleBinary(socket, frame(index, 1, 3200));
+        await waitFor(() => sentEvents.some(event => event.type === 'voice.audio.ack' &&
+          (event.data as Record<string, unknown>).sequence === index));
+      }
+      expect(vad.detect).toHaveBeenCalledTimes(calls);
+      expect(sentEvents.some(event => event.type === 'voice.audio.flow' &&
+        (event.data as Record<string, unknown>).paused === true)).toBe(false);
+    } finally {
+      release({ success: true, answer: 'Hello.', model: 'test', toolCalls: [], sources: [] });
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.assistant.turn.end'));
+  });
+
+  it('rejects repetitive Telugu STT even when the provider marks it reliable', async () => {
+    sttTranscribe.mockResolvedValue({
+      text: 'జనేచ '.repeat(24) + 'జనే', language: 'te', isFinal: true,
+      recognitionQuality: { reliable: true, reason: 'accepted' },
+    });
+    await beginSession();
+    for (let index = 0; index < 11; index++) {
+      manager.handleBinary(socket, frame(index, 1, 3200));
+      await waitFor(() => vad.detect.mock.calls.length >= (index + 1) * 5);
+    }
+    await waitFor(() => sentEvents.some(event => event.type === 'voice.session.error'));
+    expect(agentInvoke).not.toHaveBeenCalled();
+    expect(tts.synthesize).not.toHaveBeenCalled();
+    expect(sentEvents.some(event => event.type === 'voice.transcript.final')).toBe(false);
   });
 
   it('uses one batched VAD call per 100 ms packet while retaining all per-frame decisions', async () => {
