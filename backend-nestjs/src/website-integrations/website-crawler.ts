@@ -8,6 +8,8 @@ const MAX_PAGES = 100;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 7000;
 const CRAWLER_AGENT = 'McZENBot/1.0 (+https://mczen.in/bot)';
+const MCZEN_STATIC_FIELDS = ['ProductDescription', 'Composition', 'Features', 'Ingredients', 'Dosage', 'HowToUse',
+  'StorageInstructions', 'Warnings', 'SideEffects', 'Contraindications', 'TandC'] as const;
 
 export interface CrawledPage {
   url: string;
@@ -21,6 +23,29 @@ export interface CrawledPage {
 }
 
 export class WebsiteCrawler {
+  async fetchMczenProductKnowledge(productKey: string, name: string): Promise<Record<string, string>> {
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(productKey))
+      throw new Error('Invalid McZEN product identifier');
+    const origin = 'https://api.mczen.in';
+    const body = await this.fetchText(`${origin}/api/v1/product/detail/get`, origin, 'application/json',
+      JSON.stringify({ ProductKey: productKey, ProductCode: null, CountryCode: 'IN' }));
+    const payload: unknown = JSON.parse(body);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid McZEN product response');
+    const response = payload as Record<string, unknown>;
+    if (response.Success !== true || !Array.isArray(response.Data) || response.Data.length !== 1)
+      throw new Error('McZEN product details unavailable');
+    const detail: unknown = response.Data[0];
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) throw new Error('Invalid McZEN product details');
+    const row = detail as Record<string, unknown>;
+    if (typeof row.ProductKey !== 'string' || row.ProductKey.toLowerCase() !== productKey.toLowerCase() ||
+        typeof row.ProductName !== 'string' || row.ProductName.trim().toLowerCase() !== name.trim().toLowerCase())
+      throw new Error('McZEN product identity mismatch');
+    const facts: Record<string, string> = {};
+    for (const key of MCZEN_STATIC_FIELDS) {
+      if (typeof row[key] === 'string') facts[key] = row[key];
+    }
+    return facts;
+  }
     async fetchStorefrontCatalog(origin: string): Promise<unknown | null> {
     const url = new URL('/data/storefront.json', origin).toString();
 
@@ -44,6 +69,28 @@ export class WebsiteCrawler {
         throw new Error('Storefront catalogue has an unexpected structure');
       }
 
+      if (['https://mczen.aajcodershub.com', 'https://mczen.in'].includes(new URL(origin).origin)) {
+        if (data.products.length > MAX_PAGES) throw new Error('McZEN catalogue product limit exceeded');
+        if (Array.isArray(data.details)) throw new Error('Invalid McZEN detail map');
+        const details = { ...data.details as Record<string, unknown> };
+        for (const product of data.products as unknown[]) {
+          if (!product || typeof product !== 'object' || Array.isArray(product)) throw new Error('Invalid McZEN product row');
+          const row = product as Record<string, unknown>;
+          if (typeof row.ProductKey !== 'string' || typeof row.ProductName !== 'string') throw new Error('Missing McZEN product identity');
+          const facts = await this.fetchMczenProductKnowledge(row.ProductKey, row.ProductName);
+          const oldKey = Object.keys(details).find(key => key.toLowerCase() === String(row.ProductKey).toLowerCase());
+          const existing = oldKey ? details[oldKey] : undefined;
+          const preserved = existing && typeof existing === 'object' && !Array.isArray(existing)
+            ? { ...existing as Record<string, unknown> } : {};
+          for (const field of MCZEN_STATIC_FIELDS) delete preserved[field];
+          if (oldKey) delete details[oldKey];
+          details[row.ProductKey] = {
+            ...preserved,
+            ...facts,
+          };
+        }
+        return { ...data, details };
+      }
       return catalog;
     } catch (error) {
       if (error instanceof Error && /^HTTP (?:404|410)$/.test(error.message)) {
@@ -142,13 +189,14 @@ export class WebsiteCrawler {
     }
   }
 
-  private async fetchText(urlValue: string, origin: string, acceptedTypes: string): Promise<string> {
+  private async fetchText(urlValue: string, origin: string, acceptedTypes: string, jsonBody?: string): Promise<string> {
     let url = new URL(urlValue);
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
       if (url.origin !== origin || !['http:', 'https:'].includes(url.protocol)) throw new Error('URL outside origin');
       const addresses = await this.resolvePublic(url.hostname);
-      const result = await this.requestOnce(url, addresses);
+      const result = await this.requestOnce(url, addresses, jsonBody);
       if (result.status >= 300 && result.status < 400 && result.location) {
+        if (jsonBody !== undefined) throw new Error('McZEN API redirects are not allowed');
         if (redirects === MAX_REDIRECTS) throw new Error('Redirect limit exceeded');
         url = new URL(result.location, url);
         continue;
@@ -176,18 +224,19 @@ export class WebsiteCrawler {
     return addresses;
   }
 
-  private requestOnce(url: URL, addresses: Array<{ address: string; family: number }>): Promise<{
+  private requestOnce(url: URL, addresses: Array<{ address: string; family: number }>, jsonBody?: string): Promise<{
     status: number; location: string | undefined; contentType: string; body: string;
   }> {
     return new Promise((resolve, reject) => {
       const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
       let finished = false;
       const req = transport(url, {
-        method: 'GET',
+        method: jsonBody === undefined ? 'GET' : 'POST',
         headers: {
   'User-Agent': CRAWLER_AGENT,
   Accept: 'text/html,application/xml,text/xml,text/plain,application/json',
   'Accept-Encoding': 'identity',
+  ...(jsonBody === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(jsonBody) }),
 },
         lookup: (_hostname, options, callback) => {
           if (options && typeof options === 'object' && 'all' in options && options.all) {
@@ -228,7 +277,7 @@ export class WebsiteCrawler {
       }
       req.on('timeout', () => req.destroy(new Error('Request timed out')));
       req.on('error', fail);
-      req.end();
+      req.end(jsonBody);
     });
   }
 }
@@ -294,6 +343,7 @@ function cleanText(value: string): string {
   return decodeEntities(value.replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ').trim().slice(0, 200_000);
 }
+export { cleanText as cleanWebsiteText };
 
 function extractAttribute(tag: string, name: string): string | null {
   const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));

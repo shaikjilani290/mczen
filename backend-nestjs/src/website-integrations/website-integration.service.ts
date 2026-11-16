@@ -154,11 +154,12 @@ export class WebsiteIntegrationService {
 
       errors.push(...result.errors.slice(0, Math.max(0, 50 - errors.length)));
 
-      const imported = await this.importStorefrontProducts(record);
+      const catalog = await this.crawler.fetchStorefrontCatalog(record.origin);
+      const imported = await this.importStorefrontProducts(record, catalog);
       products = imported.accepted;
       errors.push(...imported.errors.slice(0, Math.max(0, 50 - errors.length)));
 
-      const pageImport = await this.importStorefrontPages(record);
+      const pageImport = await this.importStorefrontPages(record, catalog);
       pages += pageImport.accepted;
       indexed += pageImport.indexed;
       errors.push(...pageImport.errors.slice(0, Math.max(0, 50 - errors.length)));
@@ -193,8 +194,9 @@ export class WebsiteIntegrationService {
 
   private async importStorefrontPages(
     record: WebsiteIntegrationRecord,
+    suppliedCatalog?: unknown,
   ): Promise<{ accepted: number; indexed: number; errors: string[] }> {
-    const catalog = await this.crawler.fetchStorefrontCatalog(record.origin);
+    const catalog = suppliedCatalog === undefined ? await this.crawler.fetchStorefrontCatalog(record.origin) : suppliedCatalog;
 
     if (!catalog || typeof catalog !== 'object') {
       return { accepted: 0, indexed: 0, errors: ['Catalogue unavailable for page indexing.'] };
@@ -387,8 +389,9 @@ export class WebsiteIntegrationService {
 
   private async importStorefrontProducts(
     record: WebsiteIntegrationRecord,
+    suppliedCatalog?: unknown,
   ): Promise<{ accepted: number; errors: string[] }> {
-    const catalog = await this.crawler.fetchStorefrontCatalog(record.origin);
+    const catalog = suppliedCatalog === undefined ? await this.crawler.fetchStorefrontCatalog(record.origin) : suppliedCatalog;
 
     if (!catalog) {
       return { accepted: 0, errors: ['No /data/storefront.json catalogue found.'] };
@@ -522,6 +525,10 @@ export class WebsiteIntegrationService {
           }
 
           const attributes: Record<string, unknown> = {};
+          if (['https://mczen.aajcodershub.com', 'https://mczen.in'].includes(record.origin)) {
+            attributes.knowledgeSourceUrl = 'https://api.mczen.in/api/v1/product/detail/get';
+            attributes.knowledgeSourceProductKey = externalProductId;
+          }
           const attributeValues: Record<string, unknown> = {
             productId: text(row.ProductId),
             productCode: text(detail.ProductCode),
