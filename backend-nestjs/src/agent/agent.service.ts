@@ -29,6 +29,7 @@ import { isGeneralInformationRequest, isProductInformationRequest, productQuery,
 import { readStreamedAnswer } from './providers/streamed-answer';
 import { ProductIdentityService, canonicalizeProductNames, normalizeProductName, productMentions, resolveProduct, type ProductIdentity } from '../website-integrations/product-identity.service';
 import { WebsiteKnowledgeEngine } from '../website-integrations/website-knowledge.engine';
+import { bilingualProductAnswer } from './bilingual-product-answer';
 
 export interface AgentTurnOptions {
   signal?: AbortSignal;
@@ -251,7 +252,8 @@ export class AgentService {
       }
     }
     const informationPattern = isProductInformationRequest(question);
-    const vocabulary = (informationPattern ||
+    const localizedCatalogueTurn = Boolean(context.merchant && (context.language === 'hi' || context.language === 'te'));
+    const vocabulary = (informationPattern || localizedCatalogueTurn ||
       ['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP', 'ADD_TO_CART', 'REMOVE_FROM_CART', 'UPDATE_CART_QUANTITY'].includes(intent))
       ? await this.productIdentity?.vocabulary(context) ?? [] : [];
     question = canonicalizeProductNames(question, vocabulary);
@@ -261,7 +263,10 @@ export class AgentService {
     const informationRequest = informationPattern && !generalInquiry &&
       !/\b(?:it|its|this|that)\b|దాని|దీని|ఇందులో|इसके|इसकी|इसमें/iu.test(question) &&
       ['GENERAL_CONVERSATION', 'PRODUCT_SEARCH', 'PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP'].includes(intent);
-    if (informationRequest) intent = 'PRODUCT_DETAILS';
+    const localizedNamedInformation = localizedCatalogueTurn && intent === 'GENERAL_CONVERSATION' &&
+      productMentions(question, vocabulary).length === 1 && !generalInquiry &&
+      !/\b(cart|add|remove|buy|checkout|pay|order)\b|कार्ट|जोड़|हटाओ|కార్ట్|జోడించ|తొలగించ/iu.test(question);
+    if (informationRequest || localizedNamedInformation) intent = 'PRODUCT_DETAILS';
     let pinnedProduct: ProductIdentity | undefined;
     const wrongProductAnswer = (text: string) => pinnedProduct !== undefined && (
       productMentions(text, vocabulary).some(product => product.externalProductId !== pinnedProduct!.externalProductId) ||
@@ -641,7 +646,8 @@ export class AgentService {
 
     const generateProductExplanation = contextualProductLookup?.name === 'get_product_details' &&
       detailTopic && (conversational || this.config.values.llmProvider === 'openai-compatible' || this.config.values.ollamaFallbackEnabled);
-    const websiteAnswer = conversational || generateProductExplanation ? undefined : await this.websiteKnowledge?.answer(
+    const bilingualDetails = responseLanguage !== 'en' && contextualProductLookup?.name === 'get_product_details';
+    const websiteAnswer = conversational || generateProductExplanation || bilingualDetails ? undefined : await this.websiteKnowledge?.answer(
       question,
       context,
       this.config.values.llmProvider === 'ollama' && this.config.values.ollamaFallbackEnabled,
@@ -901,6 +907,21 @@ export class AgentService {
           pinnedProduct = { externalProductId: product.externalProductId, name: product.name };
           this.logger.log({ event: 'product_identity_context', requestId: context.requestId,
             selectedProductId: pinnedProduct.externalProductId, selectedProductName: pinnedProduct.name });
+          if (responseLanguage !== 'en') {
+            options.signal?.throwIfAborted();
+            const localized = bilingualProductAnswer(question, responseLanguage, product, execution.data.pageContext);
+            executedTools.push({ name: initialLookup.name, resultCount: 1 });
+            toolTraces.push({
+              name: initialLookup.name, round: 0, sequence: toolTraces.length, arguments: initialLookup.input,
+              outcome: 'succeeded', errorCode: null, durationMs: Date.now() - startedAt, resultSummary: { resultCount: 1 },
+            });
+            if (localized.missingSections.length || localized.untranslatedSections.length) this.logger.warn({
+              event: 'bilingual_product_content_incomplete', requestId: context.requestId,
+              productId: product.externalProductId, language: responseLanguage,
+              missingSections: localized.missingSections, untranslatedSections: localized.untranslatedSections,
+            });
+            return respond(true, localized.answer, 'verified-bilingual-catalogue');
+          }
           messages.push({ role: 'system', content: `The only selected product is ${JSON.stringify(pinnedProduct.name)}. Keep its identity unchanged. Start the answer with its exact name. Do not replace it with any other product.` });
         }
         if (!conversational && initialLookup.name === 'get_product_details' && isRecord(execution.data) &&
@@ -1044,13 +1065,11 @@ export class AgentService {
 
     const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
 
-    let multilingualRecoveryAttempted = false;
-    let multilingualRecoveryFailure: string | undefined;
     // 4. Ollama agent execution loop.
     for (let round = 0; round < maxRounds; round++) {
       // The final request is included in the round ceiling, not an extra call.
       const finalAnswerOnly =
-        multilingualRecoveryAttempted || merchantEvidenceReady || generalWellness || clarifyGoals ||
+        merchantEvidenceReady || generalWellness || clarifyGoals ||
         (conversational && /^(?:hello|hi|hey)(?:\s+mczen)?[!., ]*$/i.test(question.trim())) ||
         round === maxRounds - 1 || totalToolCalls >= maxToolCalls;
       const limitCode: RuntimeErrorCode =
@@ -1094,9 +1113,9 @@ export class AgentService {
             : 'OLLAMA_INVALID_RESPONSE';
         this.traceFailure(context.requestId, code);
         return respond(false,
-          multilingualRecoveryFailure ?? (finalAnswerOnly && !merchantEvidenceReady && executedTools.length > 0
+          finalAnswerOnly && !merchantEvidenceReady && executedTools.length > 0
             ? RUNTIME_ERRORS[limitCode]
-            : RUNTIME_ERRORS[code]),
+            : RUNTIME_ERRORS[code],
         );
       }
 
@@ -1109,27 +1128,6 @@ export class AgentService {
           : responseLanguage === 'hi' ? /\p{Script=Devanagari}/u : undefined;
         const repetitive = hasRepetitiveText(answer);
         const wrongLanguage = Boolean(answer && languageScript && !languageScript.test(answer));
-        if (languageScript && (repetitive || wrongLanguage) && !multilingualRecoveryAttempted &&
-            round + 1 < maxRounds) {
-          options.signal?.throwIfAborted();
-          multilingualRecoveryAttempted = true;
-          multilingualRecoveryFailure = responseLanguage === 'te'
-            ? 'క్షమించండి, తెలుగులో సరైన సమాధానం రూపొందించలేకపోయాను. దయచేసి మళ్లీ ప్రయత్నించండి.'
-            : 'क्षमा करें, हिंदी में सही उत्तर तैयार नहीं हो सका। कृपया फिर से प्रयास करें।';
-          this.logger.warn({
-            event: repetitive ? 'assistant_repetitive_response_rejected' : 'assistant_response_language_rejected',
-            requestId: context.requestId, requestedLanguage: responseLanguage, answerChars: answer.length,
-          });
-          this.logger.warn({
-            event: 'assistant_multilingual_recovery', requestId: context.requestId,
-            requestedLanguage: responseLanguage, reason: repetitive ? 'repetitive' : 'wrong_language',
-          });
-          messages.push({
-            role: 'system',
-            content: `${languageInstruction}\nThe previous draft failed the output quality check. Write a fresh, concise answer in at most 60 words and three short sentences. Use only facts already supplied for the current question. Do not repeat words, phrases or lists. Keep catalogue names unchanged. Preserve relevant safety qualifications. If the requested facts are absent, say so in the requested language. Do not call tools, invent facts or claim any new shopping operation.`,
-          });
-          continue;
-        }
         if (repetitive) {
           this.logger.warn({ event: 'assistant_repetitive_response_rejected', requestId: context.requestId,
             requestedLanguage: responseLanguage, answerChars: answer.length });
@@ -1158,13 +1156,13 @@ export class AgentService {
           answer += `\n\n${clinicalQualification}`;
         }
         if (!answer) this.traceFailure(context.requestId, 'OLLAMA_EMPTY_RESPONSE');
-        return respond(Boolean(answer), answer || multilingualRecoveryFailure || RUNTIME_ERRORS.OLLAMA_EMPTY_RESPONSE);
+        return respond(Boolean(answer), answer || RUNTIME_ERRORS.OLLAMA_EMPTY_RESPONSE);
       }
 
       // Models can still request tools after they are removed. Never execute them.
       if (finalAnswerOnly) {
         this.traceFailure(context.requestId, limitCode);
-        return respond(false, multilingualRecoveryFailure ?? RUNTIME_ERRORS[limitCode]);
+        return respond(false, RUNTIME_ERRORS[limitCode]);
       }
 
       const remainingCalls = maxToolCalls - totalToolCalls;
