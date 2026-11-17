@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { tenantContextStore } from '../common/tenant/tenant-context.store';
 import { isUuidv7 } from '../common/ids/uuid';
-import { readLoopbackUrl, fetchWithTimeout, Semaphore } from './voice-provider.util';
+import { readLoopbackUrl, fetchWithTimeout, Semaphore, VoiceProviderError } from './voice-provider.util';
 import type { TtsAudioChunk, TtsRequest } from './tts/tts.port';
 import type { VoiceLanguage } from './voice.types';
 
@@ -240,8 +240,16 @@ export class VoiceLibraryService implements OnModuleDestroy {
     profile.state = active ? 'active' : 'inactive'; await this.save(tenant, profile);
     return profile;
   }
-  preview(id: string, text: string, language?: unknown) {
-    return this.mutations.run(() => this.previewProfile(id, text, language));
+  async preview(id: string, text: string, language?: unknown) {
+    try {
+      return await this.mutations.run(() => this.previewProfile(id, text, language));
+    } catch (error) {
+      if (!(error instanceof VoiceProviderError)) throw error;
+      this.logger.warn({ event: 'voice_preview_provider_failed', voiceId: id, code: error.code });
+      throw new ServiceUnavailableException(error.code === 'VOICE_PROVIDER_TIMEOUT'
+        ? 'Voice preview timed out. Check the private Dhvaani service before retrying.'
+        : 'Voice preview provider failed. Check the private Dhvaani logs for missing Python dependencies or synthesis errors.');
+    }
   }
   private async previewProfile(id: string, text: string, language?: unknown) {
     const tenant = this.tenant(); const profile = await this.get(id);
@@ -270,7 +278,10 @@ export class VoiceLibraryService implements OnModuleDestroy {
         body: JSON.stringify({ text, language, prompt_text: profile.referenceText, reference_wav: reference.toString('base64') }),
         signal, redirect: 'error',
       }, 120_000, async response => {
-        if (!response.ok) throw new ServiceUnavailableException('Dhvaani reference speech failed. Check the provider; the default voice was not substituted.');
+        if (!response.ok) {
+          this.logger.warn({ event: 'dhvaani_reference_request_failed', voiceId: id, status: response.status });
+          throw new ServiceUnavailableException('Dhvaani reference speech failed. Check the provider; the default voice was not substituted.');
+        }
         const bytes = await limitedBody(response, 5_000_000);
         if (!response.headers.get('content-type')?.includes('audio/wav') || bytes.length < 44 ||
             bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') {
