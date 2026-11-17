@@ -1,4 +1,6 @@
-import { Controller, Get, Inject } from '@nestjs/common';
+import { Controller, Get, Inject, Optional } from '@nestjs/common';
+import { tenantContextStore } from '../common/tenant/tenant-context.store';
+import { VoiceLibraryService } from './voice-library.service';
 import { RequirePermission } from '../auth/auth.decorators';
 import { SHARED_STATE, type SharedState } from '../shared-state/shared-state';
 import { SPEECH_TO_TEXT, type SpeechToTextPort } from './stt/stt.port';
@@ -16,6 +18,7 @@ export class VoiceCapabilitiesController {
     @Inject(TEXT_TO_SPEECH) private readonly tts: TextToSpeechPort,
     @Inject(VOICE_ACTIVITY) private readonly vad: VoiceActivityPort,
     @Inject(SHARED_STATE) private readonly store: SharedState,
+    @Optional() private readonly library?: VoiceLibraryService,
   ) {}
 
   @Get('capabilities')
@@ -24,6 +27,8 @@ export class VoiceCapabilitiesController {
     const [stt, tts, vad] = await Promise.all([this.stt, this.tts, this.vad].map(async (port) => {
       try { return await port.healthCheck(); } catch { return false; }
     }));
+    const customVoices = this.library
+      ? await this.library.activeForTenant(tenantContextStore.getOrThrow().tenantId) : [];
     return {
       protocol: 'mczen-voice.v1',
       providers: {
@@ -36,7 +41,8 @@ export class VoiceCapabilitiesController {
         recognition: true,
         speech: this.tts.supports(language),
         textOnly: !this.tts.supports(language),
-        voices: this.tts.voices(language),
+        voices: [...this.tts.voices(language), ...customVoices.filter(voice => voice.language === language)
+          .map(voice => ({ ...voice, name: voice.label }))],
       })),
       limits: {
         maxSessionsPerTenant: MAX_TENANT_SESSIONS,

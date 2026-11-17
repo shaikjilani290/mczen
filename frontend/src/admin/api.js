@@ -83,6 +83,7 @@ export const auth = {
 };
 
 export const voiceLibrary = {
+  setGender: (id, gender) => request("PATCH", `/api/voice/profiles/${encodeURIComponent(id)}/wording`, { body: { gender } }),
   list: () => request("GET", "/api/voice/profiles"),
   process: (id, options = {}) => request("POST", `/api/voice/profiles/${encodeURIComponent(id)}/process`, { body: options }),
   activate: (id, active, language) => request("PATCH", `/api/voice/profiles/${encodeURIComponent(id)}`, { body: { active, ...(language ? { language } : {}) } }),

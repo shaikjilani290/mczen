@@ -15,7 +15,7 @@ export class VoiceLibraryController {
 
   @Post()
   @RequirePermission('assistants:write')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_VOICE_UPLOAD, files: 1, fields: 5, parts: 6, fieldSize: 5000 } }))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_VOICE_UPLOAD, files: 1, fields: 6, parts: 7, fieldSize: 5000 } }))
   upload(@UploadedFile() file: { buffer: Buffer; mimetype: string; size: number } | undefined, @Body() body: unknown, @CurrentUser() user: AuthenticatedUser) {
     return this.library.create(file, body, user.userId);
   }
@@ -23,6 +23,16 @@ export class VoiceLibraryController {
   @Post(':id/process')
   @RequirePermission('assistants:write')
   process(@Param('id') id: string, @Body() body: unknown) { return this.library.process(id, body); }
+
+  @Patch(':id/wording')
+  @RequirePermission('assistants:write')
+  setGender(@Param('id') id: string, @Body() body: unknown) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).length !== 1 || !('gender' in body)) {
+      throw new BadRequestException('Only a speaker gender field is accepted.');
+    }
+    return this.library.setGender(id, body.gender);
+  }
 
   @Patch(':id')
   @RequirePermission('assistants:write')

@@ -399,13 +399,13 @@ export function Conversations() {
 }
 
 export function VoiceSettings() {
-  const { loading, error, data } = useLoad(() => voice.capabilities(), []);
-  if (loading) return <Loading />;
+  const { loading, error, data, reload } = useLoad(() => voice.capabilities(), []);
+  if (loading && !data) return <Loading />;
   if (error) return <Banner error={error} />;
   return (
     <div>
       <h2>Voice settings</h2>
-      <VoiceLibrary />
+      <VoiceLibrary onVoicesChanged={reload} />
       <div className="ad-cards">
         {Object.entries(data.providers).map(([k, p]) => (
           <div className="ad-card" key={k}><b>{p.healthy ? "Healthy" : "Unavailable"}</b><span>{k.toUpperCase()}: {p.engine}</span></div>
@@ -430,12 +430,13 @@ export function VoiceSettings() {
   );
 }
 
-function VoiceLibrary() {
+function VoiceLibrary({ onVoicesChanged }) {
   const { loading, error, data, reload } = useLoad(() => voiceLibrary.list(), []);
   const [name, setName] = useState("");
   const [file, setFile] = useState(null);
   const [consent, setConsent] = useState(false);
   const [referenceText, setReferenceText] = useState("");
+  const [gender, setGender] = useState("neutral");
   const [language, setLanguage] = useState("en");
   const [save, run] = useSave();
   const perform = (operation, message) => run(async () => { await operation(); reload(); }, message);
@@ -447,9 +448,14 @@ function VoiceLibrary() {
     {loading && <Loading />}<Banner error={error} /><Status s={save} />
     <form className="ad-form" onSubmit={(event) => {
       event.preventDefault();
-      void perform(() => voiceLibrary.upload({ name, language, consent, provider: "dhvaani", referenceText }, file), "Private recording uploaded. Select Process, then preview each language.");
+      void perform(() => voiceLibrary.upload({ name, language, consent, provider: "dhvaani", referenceText, gender }, file), "Private recording uploaded. Select Process, then preview each language.");
     }}>
       <label>Voice name<input required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>Speaker wording
+        <select value={gender} onChange={event => setGender(event.target.value)}>
+          <option value="neutral">Neutral / unspecified</option><option value="female">Female</option><option value="male">Male</option>
+        </select>
+      </label>
       <label>Language spoken in the recording
         <select value={language} onChange={(event) => setLanguage(event.target.value)}>
           {["en", "hi", "te"].map(code => <option key={code} value={code}>{LANGS[code]}</option>)}
@@ -469,17 +475,18 @@ function VoiceLibrary() {
     </form>
     <button className="ad-quiet" onClick={reload}>Refresh processing status</button>
     {(data?.items || []).map((profile) => <VoiceProfileControls key={profile.id} profile={profile}
-      configured={data.dhvaaniConfigured} busy={save.busy} run={run} perform={perform} reload={reload} />)}
+      configured={data.dhvaaniConfigured} busy={save.busy} run={run} perform={perform} reload={reload} onVoicesChanged={onVoicesChanged} />)}
   </section>;
 }
 
 const VOICE_PREVIEWS = {
   en: "Hello! I am your McZEN shopping assistant. How can I help you today?",
-  hi: "नमस्ते! मैं आपका McZEN शॉपिंग सहायक हूँ। आज मैं आपकी कैसे मदद कर सकता हूँ?",
+  hi: "नमस्ते! मैं आपका McZEN शॉपिंग सहायक हूँ। मैं आपकी मदद कर सकता हूँ। आज आपको क्या जानकारी चाहिए?",
   te: "నమస్కారం! నేను మీ McZEN షాపింగ్ సహాయకుడిని. ఈ రోజు మీకు ఎలా సహాయం చేయగలను?",
 };
 
-function VoiceProfileControls({ profile, configured, busy, run, perform, reload }) {
+function VoiceProfileControls({ profile, configured, busy, run, perform, reload, onVoicesChanged }) {
+  const [gender, setGender] = useState(profile.gender || "neutral");
   const [referenceText, setReferenceText] = useState(profile.referenceText || "");
   const [referenceLanguage, setReferenceLanguage] = useState(profile.language);
   const [language, setLanguage] = useState(profile.language);
@@ -493,6 +500,15 @@ function VoiceProfileControls({ profile, configured, busy, run, perform, reload 
       <b>{profile.name}</b> <span className="ad-pill">{profile.state}</span>
       <p className="ad-muted">{profile.language} · {profile.provider} · {fmt(profile.createdAt)}</p>
       {profile.error && <Banner error={profile.error} />}
+      <label>Speaker wording
+        <select value={gender} disabled={busy || ["active", "processing"].includes(profile.state)}
+          onChange={event => { setGender(event.target.value); setPreview(null); setListened(false); }}>
+          <option value="neutral">Neutral / unspecified</option><option value="female">Female</option><option value="male">Male</option>
+        </select>
+      </label>
+      <button disabled={busy || ["active", "processing"].includes(profile.state) || gender === (profile.gender || "neutral")}
+        onClick={() => perform(() => voiceLibrary.setGender(profile.id, gender), "Speaker wording saved. Generate and listen to new previews before activation.")}>Save speaker wording</button>
+      <p className="ad-muted">This controls assistant self-reference grammar, not pitch. Deactivate all languages before changing it. Telugu first-person verbs often stay the same.</p>
       <label>Reference transcript (required for processing or upgrading older uploads)
         <textarea maxLength={4000} value={referenceText} disabled={profile.state === "active" || busy}
           onChange={event => setReferenceText(event.target.value)} />
@@ -522,7 +538,7 @@ function VoiceProfileControls({ profile, configured, busy, run, perform, reload 
         ? (profile.activeLanguages || []).map(code => LANGS[code]).join(", ") || "None"
         : profile.state === "active" ? "English" : "None"}</p>
       <div className="ad-actions">
-        <button disabled={busy || !["ready", "active", "inactive"].includes(profile.state)} onClick={() => run(async () => {
+        <button disabled={busy || gender !== (profile.gender || "neutral") || !["ready", "active", "inactive"].includes(profile.state)} onClick={() => run(async () => {
           setListened(false); setPreview(null);
           const blob = await voiceLibrary.preview(profile.id, VOICE_PREVIEWS[language], language);
           setPreview({ url: URL.createObjectURL(blob), language });
@@ -530,7 +546,7 @@ function VoiceProfileControls({ profile, configured, busy, run, perform, reload 
         }, "Preview generated. Play it to the end and check pronunciation before activating this language.")}>Generate {LANGS[language]} preview</button>
         <button disabled={busy || !["ready", "active", "inactive"].includes(profile.state) ||
             (!active && (!listened || preview?.language !== language))}
-          onClick={() => perform(() => voiceLibrary.activate(profile.id, !active, language),
+          onClick={() => perform(async () => { await voiceLibrary.activate(profile.id, !active, language); onVoicesChanged(); },
             active ? "Language deactivated." : "Voice activated for this language. Select it in your app voice settings.")}>
           {active ? `Deactivate ${LANGS[language]}` : `Activate ${LANGS[language]} after listening`}</button>
       </div>

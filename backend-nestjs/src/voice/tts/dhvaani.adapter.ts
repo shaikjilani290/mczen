@@ -1,6 +1,7 @@
 ﻿
 import { Injectable } from '@nestjs/common';
 import type { VoiceLanguage } from '../voice.types';
+import { isSpeakerGender } from '../speaker-wording';
 import {
   fetchWithTimeout,
   readLoopbackUrl,
@@ -44,7 +45,10 @@ export class DhvaaniAdapter implements TextToSpeechPort {
   }
 
   voices(language: VoiceLanguage): readonly TtsVoiceOption[] {
-    return DHVAANI_VOICES[language] ?? [];
+    const gender = process.env.DHVAANI_SPEAKER_GENDER;
+    return (DHVAANI_VOICES[language] ?? []).map(voice => ({
+      ...voice, gender: isSpeakerGender(gender) ? gender : 'neutral',
+    }));
   }
 
   async *synthesize(request: TtsRequest): AsyncIterable<TtsAudioChunk> {

@@ -9,6 +9,7 @@ import { isUuidv7 } from '../common/ids/uuid';
 import { readLoopbackUrl, fetchWithTimeout, Semaphore, VoiceProviderError } from './voice-provider.util';
 import type { TtsAudioChunk, TtsRequest } from './tts/tts.port';
 import type { VoiceLanguage } from './voice.types';
+import { isSpeakerGender, speakerWording, type SpeakerGender } from './speaker-wording';
 
 const execute = promisify(execFile);
 export const MAX_VOICE_UPLOAD = 20 * 1024 * 1024;
@@ -19,6 +20,7 @@ export interface VoiceProfile {
   referenceText?: string;
   previewedLanguages?: VoiceLanguage[];
   activeLanguages?: VoiceLanguage[];
+  gender?: SpeakerGender;
 }
 const LANGUAGES: readonly VoiceLanguage[] = ['en', 'hi', 'te'];
 function isLanguage(value: unknown): value is VoiceLanguage { return LANGUAGES.some(language => language === value); }
@@ -83,11 +85,30 @@ export class VoiceLibraryService implements OnModuleDestroy {
     } catch (error) { if (isMissing(error)) throw new NotFoundException('Voice not found.'); throw error; }
   }
   get(id: string) { return this.getForTenant(this.tenant(), id); }
+  setGender(id: string, gender: unknown) {
+    return this.mutations.run(async () => {
+      if (!isSpeakerGender(gender)) throw new BadRequestException('Choose male, female or neutral speaker wording.');
+      const tenant = this.tenant();
+      const profile = await this.get(id);
+      if (profile.state === 'active' || profile.state === 'processing') {
+        throw new BadRequestException('Deactivate all languages and wait for processing before changing speaker wording.');
+      }
+      if ((profile.gender ?? 'neutral') === gender) return profile;
+      profile.gender = gender;
+      profile.previewedLanguages = [];
+      for (const name of ['preview.wav', ...LANGUAGES.map(language => `preview-${language}.wav`)]) {
+        await fs.rm(join(this.directory(tenant, id), name), { force: true });
+      }
+      await this.save(tenant, profile);
+      return profile;
+    });
+  }
   async create(file: { buffer: Buffer; mimetype: string; size: number } | undefined, body: unknown, userId: string) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('Invalid voice metadata.');
     const input = body as Record<string, unknown>;
     const dhvaani = input.provider === 'dhvaani';
-    if (Object.keys(input).some((key) => !['name', 'language', 'consent', 'provider', 'referenceText'].includes(key)) ||
+    if (Object.keys(input).some((key) => !['name', 'language', 'consent', 'provider', 'referenceText', 'gender'].includes(key)) ||
+        (input.gender !== undefined && !isSpeakerGender(input.gender)) ||
         typeof input.name !== 'string' || !input.name.trim() || input.name.length > 100 ||
         (!dhvaani && (input.provider !== undefined && input.provider !== 'openvoice-v2' || input.language !== 'en')) ||
         !isLanguage(input.language) || ![true, 'true'].includes(input.consent as boolean | string) ||
@@ -102,6 +123,7 @@ export class VoiceLibraryService implements OnModuleDestroy {
     const profile: VoiceProfile = {
       id: randomUUID(), name: input.name.trim(), language: input.language, provider: dhvaani ? 'dhvaani' : 'openvoice-v2', state: 'uploaded',
       createdBy: userId, createdAt: new Date().toISOString(), consent: true, error: null,
+      gender: isSpeakerGender(input.gender) ? input.gender : 'neutral',
       ...(dhvaani ? { referenceText: String(input.referenceText).trim(), previewedLanguages: [], activeLanguages: [] } : {}),
     };
     const dir = this.directory(tenant, profile.id);
@@ -271,6 +293,7 @@ export class VoiceLibraryService implements OnModuleDestroy {
   }
   private async render(tenant: string, id: string, text: string, signal?: AbortSignal, language: VoiceLanguage = 'en') {
     const profile = await this.getForTenant(tenant, id);
+    text = speakerWording(text, language, profile.gender ?? 'neutral');
     if (profile.provider === 'dhvaani') {
       const reference = await fs.readFile(join(this.directory(tenant, id), 'prepared.wav'));
       return fetchWithTimeout(this.dhvaaniEndpoint('/tts/reference'), {
@@ -324,7 +347,7 @@ export class VoiceLibraryService implements OnModuleDestroy {
     return active.flatMap(profile => (profile.provider === 'dhvaani'
       ? (profile.activeLanguages ?? []).filter(language => languages.includes(language))
       : openvoiceHealthy ? [profile.language] : []).map(language => ({
-        id: `clone:${profile.id}`, label: profile.name, language, provider: profile.provider,
+        id: `clone:${profile.id}`, label: profile.name, language, provider: profile.provider, gender: profile.gender ?? 'neutral',
       })));
   }
   async assertActive(tenant: string, voice: string, language: string) {

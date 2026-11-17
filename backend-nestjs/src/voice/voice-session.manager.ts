@@ -20,6 +20,7 @@ import { SPEECH_TO_TEXT } from './stt/stt.port';
 import type { VadResult, VoiceActivityPort } from './vad/vad.port';
 import { VOICE_ACTIVITY } from './vad/vad.port';
 import type { TextToSpeechPort } from './tts/tts.port';
+import { speakerWording } from './speaker-wording';
 import { TEXT_TO_SPEECH } from './tts/tts.port';
 import { VoiceLibraryService } from './voice-library.service';
 import { audioDiagnosticsEnabled, PcmDiagnostics } from './audio-diagnostics';
@@ -1141,7 +1142,8 @@ export class VoiceSessionManager {
     for await (const sentence of streamedSentences ?? sentences) {
       sentenceIndex++;
       const request = {
-        text: sentence,
+        text: voice.startsWith('clone:') ? sentence
+          : speakerWording(sentence, language, this.tts.voices(language).find(option => option.id === voice)?.gender ?? 'neutral'),
         language,
         voice,
         rate,

@@ -17,7 +17,7 @@ export interface TtsAudioChunk {
 export interface TtsVoiceOption {
   id: string;
   label: string;
-  gender: 'male' | 'female';
+  gender: 'male' | 'female' | 'neutral';
   language: VoiceLanguage;
 }
 
