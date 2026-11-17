@@ -435,20 +435,30 @@ function VoiceLibrary() {
   const [name, setName] = useState("");
   const [file, setFile] = useState(null);
   const [consent, setConsent] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState("");
+  const [referenceText, setReferenceText] = useState("");
+  const [language, setLanguage] = useState("en");
   const [save, run] = useSave();
-  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
   const perform = (operation, message) => run(async () => { await operation(); reload(); }, message);
   return <section className="ad-box">
-    <h3>Consented voice library (English preview)</h3>
-    <p className="ad-muted">Recordings and speaker profiles are private to this tenant. OpenVoice V2 is a separate optional engine; Piper alone does not clone voices. Hindi and Telugu cloning are not enabled.</p>
-    {!data?.providerConfigured && <p role="status">Cloning provider is not configured. Uploads can be stored, but processing and activation are unavailable until a real provider generates a preview.</p>}
+    <h3>Your voice in English, Hindi and Telugu</h3>
+    <p className="ad-muted">Upload one consented recording and its exact transcript. Dhvaani uses it as the speaker reference, not as a translation. Preview and approve each output language separately; pronunciation and speaker similarity need your review.</p>
+    <p className="ad-muted">Recordings remain tenant-private on your server and are sent only to your configured private Dhvaani service for speech generation. They are not sent to an external voice vendor.</p>
+    {!data?.dhvaaniConfigured && <p role="status">Dhvaani reference speech is not configured. Uploads can be saved, but processing needs the upgraded private provider and matching reference API key.</p>}
     {loading && <Loading />}<Banner error={error} /><Status s={save} />
     <form className="ad-form" onSubmit={(event) => {
       event.preventDefault();
-      void perform(() => voiceLibrary.upload({ name, language: "en", consent }, file), "Private recording uploaded. Select Process to generate a speaker profile.");
+      void perform(() => voiceLibrary.upload({ name, language, consent, provider: "dhvaani", referenceText }, file), "Private recording uploaded. Select Process, then preview each language.");
     }}>
       <label>Voice name<input required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>Language spoken in the recording
+        <select value={language} onChange={(event) => setLanguage(event.target.value)}>
+          {["en", "hi", "te"].map(code => <option key={code} value={code}>{LANGS[code]}</option>)}
+        </select>
+      </label>
+      <label>Exact words spoken in the recording
+        <textarea required maxLength={4000} value={referenceText} onChange={(event) => setReferenceText(event.target.value)} />
+      </label>
+      <p className="ad-muted">Use the original spoken words, not a translation. Include the whole recording, in the same order. No music, other speakers or long silences.</p>
       <label>Clean speech recording (6–120 seconds, max 20 MB)
         <input required type="file" accept=".wav,.mp3,.m4a,.mp4" onChange={(event) => setFile(event.target.files[0] || null)} />
       </label>
@@ -458,26 +468,78 @@ function VoiceLibrary() {
       <button disabled={!consent || !file || save.busy}>Upload private recording</button>
     </form>
     <button className="ad-quiet" onClick={reload}>Refresh processing status</button>
-    {previewUrl && <audio controls src={previewUrl} aria-label="Private voice preview" />}
-    {(data?.items || []).map((profile) => <div className="ad-box" key={profile.id}>
+    {(data?.items || []).map((profile) => <VoiceProfileControls key={profile.id} profile={profile}
+      configured={data.dhvaaniConfigured} busy={save.busy} run={run} perform={perform} reload={reload} />)}
+  </section>;
+}
+
+const VOICE_PREVIEWS = {
+  en: "Hello! I am your McZEN shopping assistant. How can I help you today?",
+  hi: "नमस्ते! मैं आपका McZEN शॉपिंग सहायक हूँ। आज मैं आपकी कैसे मदद कर सकता हूँ?",
+  te: "నమస్కారం! నేను మీ McZEN షాపింగ్ సహాయకుడిని. ఈ రోజు మీకు ఎలా సహాయం చేయగలను?",
+};
+
+function VoiceProfileControls({ profile, configured, busy, run, perform, reload }) {
+  const [referenceText, setReferenceText] = useState(profile.referenceText || "");
+  const [referenceLanguage, setReferenceLanguage] = useState(profile.language);
+  const [language, setLanguage] = useState(profile.language);
+  const [preview, setPreview] = useState(null);
+  const [listened, setListened] = useState(false);
+  useEffect(() => () => { if (preview?.url) URL.revokeObjectURL(preview.url); }, [preview]);
+  const languages = profile.provider === "dhvaani" ? ["en", "hi", "te"] : ["en"];
+  const active = profile.provider === "dhvaani"
+    ? (profile.activeLanguages || []).includes(language) : profile.state === "active";
+  return <div className="ad-box">
       <b>{profile.name}</b> <span className="ad-pill">{profile.state}</span>
       <p className="ad-muted">{profile.language} · {profile.provider} · {fmt(profile.createdAt)}</p>
       {profile.error && <Banner error={profile.error} />}
+      <label>Reference transcript (required for processing or upgrading older uploads)
+        <textarea maxLength={4000} value={referenceText} disabled={profile.state === "active" || busy}
+          onChange={event => setReferenceText(event.target.value)} />
+      </label>
+      <label>Recording language
+        <select value={referenceLanguage} disabled={profile.state === "active" || busy}
+          onChange={event => setReferenceLanguage(event.target.value)}>
+          {["en", "hi", "te"].map(code => <option key={code} value={code}>{LANGS[code]}</option>)}
+        </select>
+      </label>
       <div className="ad-actions">
-        <button disabled={save.busy || !data.providerConfigured || ["processing", "active"].includes(profile.state)}
-          onClick={() => perform(() => voiceLibrary.process(profile.id), "Processing queued. Refresh status shortly.")}>Process / retry</button>
-        <button disabled={save.busy || !["ready", "active", "inactive"].includes(profile.state)} onClick={() => run(async () => {
-          const blob = await voiceLibrary.preview(profile.id, "Hello! I am your shopping assistant. How can I help you today?");
-          setPreviewUrl(URL.createObjectURL(blob));
-        }, "Preview generated. Listen before activation.")}>Generate preview</button>
-        <button disabled={save.busy || !["ready", "active", "inactive"].includes(profile.state)}
-          onClick={() => perform(() => voiceLibrary.activate(profile.id, profile.state !== "active"), profile.state === "active" ? "Voice deactivated." : "Voice activated.")}>
-          {profile.state === "active" ? "Deactivate" : "Activate after listening"}</button>
-        <button disabled={save.busy || ["active", "processing"].includes(profile.state)}
+        <button disabled={busy || !configured || !referenceText.trim() || ["processing", "active"].includes(profile.state)}
+          onClick={() => {
+            setPreview(null); setListened(false);
+            return perform(() => voiceLibrary.process(profile.id, { provider: "dhvaani", referenceText, language: referenceLanguage }),
+              "Processing queued. Refresh status shortly. All output languages must be previewed again.");
+          }}>Process / retry with Dhvaani</button>
+        <button disabled={busy || ["active", "processing"].includes(profile.state)}
           onClick={() => window.confirm("Permanently delete this private recording and speaker profile?") && perform(() => voiceLibrary.remove(profile.id), "Voice deleted.")}>Delete</button>
       </div>
-    </div>)}
-  </section>;
+      <label>Output language
+        <select value={language} disabled={busy} onChange={event => { setLanguage(event.target.value); setListened(false); }}>
+          {languages.map(code => <option key={code} value={code}>{LANGS[code]}</option>)}
+        </select>
+      </label>
+      <p className="ad-muted">Active languages: {profile.provider === "dhvaani"
+        ? (profile.activeLanguages || []).map(code => LANGS[code]).join(", ") || "None"
+        : profile.state === "active" ? "English" : "None"}</p>
+      <div className="ad-actions">
+        <button disabled={busy || !["ready", "active", "inactive"].includes(profile.state)} onClick={() => run(async () => {
+          setListened(false); setPreview(null);
+          const blob = await voiceLibrary.preview(profile.id, VOICE_PREVIEWS[language], language);
+          setPreview({ url: URL.createObjectURL(blob), language });
+          reload();
+        }, "Preview generated. Play it to the end and check pronunciation before activating this language.")}>Generate {LANGS[language]} preview</button>
+        <button disabled={busy || !["ready", "active", "inactive"].includes(profile.state) ||
+            (!active && (!listened || preview?.language !== language))}
+          onClick={() => perform(() => voiceLibrary.activate(profile.id, !active, language),
+            active ? "Language deactivated." : "Voice activated for this language. Select it in your app voice settings.")}>
+          {active ? `Deactivate ${LANGS[language]}` : `Activate ${LANGS[language]} after listening`}</button>
+      </div>
+      {preview && <audio key={preview.url} controls src={preview.url} aria-label={`${LANGS[preview.language]} private voice preview`}
+        onEnded={() => { if (preview.language === language) setListened(true); }} />}
+      <p className="ad-muted">Activation makes the voice selectable; it does not replace your current voice automatically.
+        In Android: Assistant setup → Advanced settings → Find available voices, then choose the language and this voice.
+        Auto language continues to use the configured defaults.</p>
+    </div>;
 }
 
 export function Platform() {

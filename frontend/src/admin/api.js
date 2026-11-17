@@ -84,8 +84,8 @@ export const auth = {
 
 export const voiceLibrary = {
   list: () => request("GET", "/api/voice/profiles"),
-  process: (id) => request("POST", `/api/voice/profiles/${encodeURIComponent(id)}/process`, { body: {} }),
-  activate: (id, active) => request("PATCH", `/api/voice/profiles/${encodeURIComponent(id)}`, { body: { active } }),
+  process: (id, options = {}) => request("POST", `/api/voice/profiles/${encodeURIComponent(id)}/process`, { body: options }),
+  activate: (id, active, language) => request("PATCH", `/api/voice/profiles/${encodeURIComponent(id)}`, { body: { active, ...(language ? { language } : {}) } }),
   remove: (id) => request("DELETE", `/api/voice/profiles/${encodeURIComponent(id)}`),
   upload(fields, file) {
     const form = new FormData();
@@ -93,11 +93,11 @@ export const voiceLibrary = {
     form.append("file", file);
     return upload("POST", "/api/voice/profiles", form);
   },
-  async preview(id, text) {
+  async preview(id, text, language) {
     const response = await fetch(`${API}/api/voice/profiles/${encodeURIComponent(id)}/preview`, {
       method: "POST",
       headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, ...(language ? { language } : {}) }),
     });
     if (!response.ok) throw fail(response, await response.json().catch(() => ({})));
     return response.blob();
