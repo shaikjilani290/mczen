@@ -293,6 +293,7 @@ export class VoiceSessionManager {
             endpointSilenceMs: settings.endpointSilenceMs,
             audioFormat: 'pcm_s16le/16000/mono',
             publicOnly: input.publicOnly === true,
+            textInput: true,
             partialTranscription: this.stt.supportsPartial !== false,
             defaultLanguage,
             allowedLanguages,
@@ -389,6 +390,33 @@ export class VoiceSessionManager {
       void session.processing.then(() => session.epoch === epoch
         ? this.runInTenant(session, () => this.finalizeUtterance(session, 'client_end')) : undefined)
         .catch(() => this.pipelineFailure(session, new Error('Audio end processing failed.')));
+      return;
+    }
+    if (event.type === 'voice.text.submit') {
+      const text = typeof dataObject.text === 'string' ? dataObject.text.trim() : '';
+      const language = dataObject.language;
+      if (!text || text.length > 2000 || Object.keys(dataObject).some(key => !['text', 'language', 'epoch'].includes(key)) ||
+          (language !== 'en' && language !== 'hi' && language !== 'te') ||
+          !session.context.allowedLanguages.includes(language)) {
+        this.sendError(session, 'INVALID_TEXT_INPUT', 'Enter a question of 1–2000 characters and select a supported language.', true);
+        return;
+      }
+      if (dataObject.epoch !== session.epoch || !['listening', 'detecting_end_of_speech'].includes(session.state)) {
+        this.sendError(session, 'TEXT_INPUT_BUSY', 'Your typed question was not sent. Wait for the current reply, then send it again.', true);
+        return;
+      }
+      await this.runInTenant(session, async () => {
+        await this.interrupt(session, 'typed_input');
+        if (!this.sessions.has(session.id) || session.state === 'closed') return;
+        const epoch = session.epoch;
+        session.context.language = language;
+        session.state = 'transcribing';
+        session.timing = { turnId: randomUUID(), startedAt: performance.now() };
+        this.sendEvent(socket, 'voice.transcript.final', {
+          text, language, turnId: session.timing.turnId, source: 'typed',
+        }, session);
+        await this.invokeAgent(session, text, epoch);
+      });
       return;
     }
     if (event.type === 'voice.assistant.interrupt') {
@@ -1273,7 +1301,9 @@ export class VoiceSessionManager {
     session.flowPaused = false;
     session.vadPending = Buffer.alloc(0);
     session.state = 'interrupted';
-    this.sendEvent(session.socket, 'voice.assistant.epoch', { epoch: session.epoch, reason: 'interrupt' }, session);
+    this.sendEvent(session.socket, 'voice.assistant.epoch', {
+      epoch: session.epoch, reason: reason === 'typed_input' ? 'typed_input' : 'interrupt',
+    }, session);
     this.sendEvent(session.socket, 'voice.assistant.interrupt', { epoch: session.epoch }, session);
     await this.persistState(session);
     await this.recordEvent(session, 'interrupt', reason);
