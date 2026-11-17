@@ -150,7 +150,10 @@ export class WebsiteCrawler {
 
   private async readRobots(origin: string): Promise<{ rules: Array<{ allow: boolean; path: string }>; sitemaps: string[] }> {
     try {
-      const text = await this.fetchText(new URL('/robots.txt', origin).toString(), origin, 'text/plain');
+      const text = await this.fetchText(new URL('/robots.txt', origin).toString(), origin, 'text/plain,text/html');
+      // SPA hosts sometimes return the app document with HTTP 200 for missing files.
+      if (/^\s*(?:<!doctype\s+html\b|<html\b)/iu.test(text)) return { rules: [], sitemaps: [] };
+      if (/^\s*</u.test(text)) throw new Error('Invalid robots.txt response: expected robots directives, received markup');
       let applies = false;
       const rules: Array<{ allow: boolean; path: string }> = [];
       const sitemaps: string[] = [];
@@ -203,7 +206,9 @@ export class WebsiteCrawler {
       }
       if (result.status < 200 || result.status >= 300) throw new Error(`HTTP ${result.status}`);
       const contentType = result.contentType.split(';', 1)[0].trim().toLowerCase();
-      if (!acceptedTypes.split(',').includes(contentType)) throw new Error('Unexpected content type');
+      if (!acceptedTypes.split(',').includes(contentType)) {
+        throw new Error(`Unexpected content type for ${url.pathname}: ${contentType || '(missing)'}; expected ${acceptedTypes}`);
+      }
       return result.body;
     }
     throw new Error('Redirect limit exceeded');
