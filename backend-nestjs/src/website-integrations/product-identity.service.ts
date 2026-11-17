@@ -31,9 +31,22 @@ function productNames(product: ProductIdentity): string[] {
 
 export function productMentions(text: string, vocabulary: readonly ProductIdentity[]): ProductIdentity[] {
   const normalized = ` ${normalizeProductName(text)} `;
-  return vocabulary.filter(product => {
-    return productNames(product).some(name => normalized.includes(` ${name} `));
-  });
+  const mentions: Array<{ product: ProductIdentity; start: number; end: number }> = [];
+  for (const product of vocabulary) {
+    for (const name of productNames(product)) {
+      const needle = ` ${name} `;
+      let start = normalized.indexOf(needle);
+      while (start !== -1) {
+        mentions.push({ product, start, end: start + needle.length });
+        start = normalized.indexOf(needle, start + 1);
+      }
+    }
+  }
+  // A pack name can contain its base product name; retain only the longest mention at that position.
+  const explicit = mentions.filter(mention => !mentions.some(other =>
+    other.start <= mention.start && other.end >= mention.end &&
+    (other.start < mention.start || other.end > mention.end)));
+  return vocabulary.filter(product => explicit.some(mention => mention.product === product));
 }
 
 export function canonicalizeProductNames(text: string, vocabulary: readonly ProductIdentity[]): string {
