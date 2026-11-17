@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { PUBLIC_VOICE_TOOLS } from '../public-voice-policy';
 import {
   type AgentExecutionContext,
   isAgentExecutionContext,
@@ -127,6 +128,11 @@ export class ToolExecutorService {
           message: 'The requested tool name is invalid.',
         },
       };
+    }
+
+    if (context.publicVoiceOnly && !PUBLIC_VOICE_TOOLS.has(name)) {
+      await finish('rejected', 'PERMISSION_DENIED');
+      return { ok: false, error: { code: 'PERMISSION_DENIED', message: 'Unlock your phone for that operation.' } };
     }
 
     // 2. Resolve the tool from the registry.

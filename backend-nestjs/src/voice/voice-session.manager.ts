@@ -75,6 +75,7 @@ interface StartPayload {
   lastEpoch?: unknown;
   audioFormat?: unknown;
   voiceId?: unknown;
+  publicOnly?: unknown;
 }
 
 @Injectable()
@@ -107,7 +108,13 @@ export class VoiceSessionManager {
     };
     checkStartup();
     diagnose('resolving_identity');
-    rejectUnknownFields(input, ['assistantId', 'conversationId', 'language', 'resumeToken', 'lastEpoch', 'audioFormat', 'voiceId']);
+    rejectUnknownFields(input, ['assistantId', 'conversationId', 'language', 'resumeToken', 'lastEpoch', 'audioFormat', 'voiceId', 'publicOnly']);
+    if (input.publicOnly !== undefined && typeof input.publicOnly !== 'boolean') {
+      return this.fail(socket, 'INVALID_SESSION_START', 'Invalid public voice mode.', 4410);
+    }
+    if (input.publicOnly === true && (!identity.widget || input.resumeToken !== undefined)) {
+      return this.fail(socket, 'INVALID_SESSION_START', 'Public voice requires a fresh public widget session.', 4410);
+    }
     if (input.audioFormat !== undefined && input.audioFormat !== 'pcm_s16le/16000/mono') {
       return this.fail(socket, 'AUDIO_FORMAT_MISMATCH', 'Only 16 kHz mono PCM16 audio is supported.', 4410);
     }
@@ -199,6 +206,7 @@ export class VoiceSessionManager {
       assistantId,
       permissions: identity.permissions,
       requestId: randomUUID(),
+      ...(input.publicOnly === true ? { publicVoiceOnly: true } : {}),
     });
     const session: VoiceSession = {
       id: sessionId,
@@ -284,6 +292,7 @@ export class VoiceSessionManager {
             vadSensitivity: settings.vadSensitivity,
             endpointSilenceMs: settings.endpointSilenceMs,
             audioFormat: 'pcm_s16le/16000/mono',
+            publicOnly: input.publicOnly === true,
             partialTranscription: this.stt.supportsPartial !== false,
             defaultLanguage,
             allowedLanguages,
@@ -958,7 +967,7 @@ export class VoiceSessionManager {
           });
         }
         const agentStarted = performance.now();
-        if (recognitionReliable && this.agent.stream) {
+        if (recognitionReliable && this.agent.stream && !session.context.agent.publicVoiceOnly) {
           const events = this.agent.stream(text, session.context.agent, session.turnAbort!.signal)[Symbol.asyncIterator]();
           try {
             const first = await events.next();
@@ -1071,6 +1080,7 @@ export class VoiceSessionManager {
       ...(result.products ? { products: result.products.slice(0, 5) } : {}),
       ...(result.cartOperation ? { ...result.cartOperation, cartOperation: result.cartOperation } : {}),
       ...(result.navigationAction ? { navigationAction: result.navigationAction } : {}),
+      ...(result.unlockRequired ? { unlockRequired: true } : {}),
       turnId,
       agentMs: session.timing?.agentMs,
     }, session);

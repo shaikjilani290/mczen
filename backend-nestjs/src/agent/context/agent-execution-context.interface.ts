@@ -20,6 +20,8 @@ export interface AgentExecutionContext {
 
   /** Indicates transcript provenance without changing agent behavior. */
   modality?: 'text' | 'voice';
+  /** Restricted public-information voice session; never a grant of privileges. */
+  publicVoiceOnly?: boolean;
 
   /**
    * Set only by the widget service after it verified a signed widget session.
@@ -68,6 +70,7 @@ export function isAgentExecutionContext(
     (context.conversationId === undefined || isUuidv7(context.conversationId)) &&
     (context.channel === undefined || context.channel === 'widget') &&
     (context.modality === undefined || context.modality === 'text' || context.modality === 'voice') &&
+    (context.publicVoiceOnly === undefined || typeof context.publicVoiceOnly === 'boolean') &&
     (context.language === undefined || context.language === 'en' || context.language === 'hi' || context.language === 'te') &&
     context.permissions.length <= 1000 &&
     context.permissions.every(

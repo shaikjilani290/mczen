@@ -12,6 +12,7 @@ import {
   isAgentExecutionContext,
 } from './context/agent-execution-context.interface';
 import { AgentRuntimeConfigService } from './config/agent-runtime-config.service';
+import { publicVoiceNeedsUnlock, publicVoiceUnlockMessage } from './public-voice-policy';
 import type { KnowledgeDocument } from './knowledge.service';
 import { ToolExecutorService } from './tools/tool-executor.service';
 import { ToolPermissionService } from './tools/tool-permission.service';
@@ -25,7 +26,7 @@ import { ConversationsService } from '../conversations/conversations.service';
 import { hasRepetitiveText } from '../common/text/repetitive-text';
 import type { ConversationToolTrace } from '../conversations/conversations.repository';
 import { MerchantCartService, type VerifiedCartOperation } from '../website-integrations/merchant-cart.service';
-import { isGeneralInformationRequest, isProductInformationRequest, productQuery, shoppingIntent } from './shopping-intent';
+import { isGeneralInformationRequest, isPriceOnlyProductRequest, isProductInformationRequest, productQuery, shoppingIntent } from './shopping-intent';
 import { readStreamedAnswer } from './providers/streamed-answer';
 import { ProductIdentityService, canonicalizeProductNames, normalizeProductName, productMentions, resolveProduct, type ProductIdentity } from '../website-integrations/product-identity.service';
 import { WebsiteKnowledgeEngine } from '../website-integrations/website-knowledge.engine';
@@ -71,6 +72,7 @@ type OllamaTool = {
 };
 
 export interface AgentResponse extends Partial<VerifiedCartOperation> {
+  unlockRequired?: boolean;
   success: boolean;
   answer: string;
   model: string;
@@ -208,6 +210,10 @@ export class AgentService {
     if (!isAgentExecutionContext(context)) {
       throw new UnauthorizedException('A backend-established tenant context is required.');
     }
+    if (context.publicVoiceOnly && publicVoiceNeedsUnlock(question)) {
+      return { success: true, answer: publicVoiceUnlockMessage(context.language),
+        model: 'locked-public-voice', toolCalls: [], sources: [], unlockRequired: true };
+    }
 
     let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
     if (context.conversationId) {
@@ -217,7 +223,7 @@ export class AgentService {
       }
       const prepared = await this.conversations.prepareAgentTurn(context.conversationId, context);
       context = { ...context, assistantId: prepared.assistantId };
-      history = prepared.history;
+      history = context.publicVoiceOnly ? [] : prepared.history;
     }
 
     // Protect the backend-established identity and grants throughout this run.
@@ -238,7 +244,7 @@ export class AgentService {
       source: string;
     }> = [];
     const products: AgentProductCard[] = [];
-    const conversational = this.config.values.responseMode === 'conversational';
+    const conversational = !context.publicVoiceOnly && this.config.values.responseMode === 'conversational';
     const generalWellness = conversational &&
       /\b(?:daily (?:health|wellness) tips|(?:health|wellness|healthy lifestyle) (?:tips|advice)|healthy habits)\b/i.test(question);
     const clarifyGoals = conversational && /\b(?:suitable|recommend|best|right)\b.*\b(?:my|me|goals)\b/i.test(question);
@@ -257,11 +263,14 @@ export class AgentService {
       ['PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP', 'ADD_TO_CART', 'REMOVE_FROM_CART', 'UPDATE_CART_QUANTITY'].includes(intent))
       ? await this.productIdentity?.vocabulary(context) ?? [] : [];
     question = canonicalizeProductNames(question, vocabulary);
+    const priceOnly = isPriceOnlyProductRequest(question);
     const generalInquiry = isGeneralInformationRequest(question) && productMentions(question, vocabulary).length === 0 &&
+      !(priceOnly && !productQuery(question)) &&
       (!/\b(?:it|its|this|that)\b|దాని|దీని|ఇందులో|इसके|इसकी|इसमें/iu.test(question) ||
         /\bexplain\s+how\s+to\s+use\s+(?:this|that|it)\b/iu.test(question));
     const informationRequest = informationPattern && !generalInquiry &&
-      !/\b(?:it|its|this|that)\b|దాని|దీని|ఇందులో|इसके|इसकी|इसमें/iu.test(question) &&
+      (!/\b(?:it|its|this|that)\b|దాని|దీని|ఇందులో|इसके|इसकी|इसमें/iu.test(question) ||
+        (localizedCatalogueTurn && productQuery(question).length > 0)) &&
       ['GENERAL_CONVERSATION', 'PRODUCT_SEARCH', 'PRODUCT_DETAILS', 'PRODUCT_FOLLOW_UP'].includes(intent);
     const localizedNamedInformation = localizedCatalogueTurn && intent === 'GENERAL_CONVERSATION' &&
       productMentions(question, vocabulary).length === 1 && !generalInquiry &&
@@ -391,10 +400,9 @@ export class AgentService {
         matchMode: 'exact-normalized', clarificationRequired: named.length !== 1 });
       return { result, named };
     };
-    const detailTopic = !generalInquiry && ((intent === 'PRODUCT_DETAILS' && !/\bprice\b/i.test(question)) || intent === 'PRODUCT_FOLLOW_UP' ||
+    const detailTopic = !generalInquiry && !priceOnly && ((intent === 'PRODUCT_DETAILS' && !/\bprice\b/i.test(question)) || intent === 'PRODUCT_FOLLOW_UP' ||
       /\b(details?|explanations?|descriptions?|explain(?:s|ing)?|describe|benefits?|ingredients?|composition|specifications?|usage|dosage|directions|warnings?|precautions?|storage|faqs?|reviews?|tabs?|features?)\b|side effects|what(?:'s| is) inside|how (?:do i |should i |to )use/i.test(question));
     const fullProductExplanation = detailTopic && /\b(full|complete|detailed|everything|all)\b/i.test(question);
-    const priceOnly = /\bprice\b/i.test(question) && !detailTopic && !/\b(about|details|explain|describe)\b/i.test(question);
     if (context.merchant && this.merchantCart && !this.isUrgentSymptomQuestion(question)) {
       if (priorShopping?.pendingClarification && /^(?:no|cancel|never mind)[.!?]*$/i.test(question.trim())) {
         await this.merchantCart.updateShoppingContext(context, { pendingClarification: '', lastIntent: 'GENERAL_CONVERSATION' });
@@ -481,7 +489,7 @@ export class AgentService {
       }
       const referenceDetails = !generalInquiry && !cartIntent && !namedDetails && ((/\b(first|second|third|this|selected|its|it|more)\b/i.test(question) &&
         (/\b(details|tell|about|price|explain|describe)\b/i.test(question) || detailTopic)) ||
-        detailTopic || /^(?:what(?:'s| is)|tell me)\s+(?:the|its)\s+price[?.!]*$/i.test(question.trim()));
+        detailTopic || priceOnly);
       if (cartIntent || referenceDetails) {
         const ordinal = /\bfirst\b/i.test(question) ? 0 : /\bsecond\b/i.test(question) ? 1 : /\bthird\b/i.test(question) ? 2 : undefined;
         let productId = await this.merchantCart.selected(context, ordinal, /\b(this|selected)\b/i.test(question));
@@ -525,20 +533,12 @@ export class AgentService {
   }
 }
         if (referenceDetails) {
-          if (!productId) return respond(true, 'Which product do you mean? Search or select a product first.', 'verified-catalogue');
-          if (!priceOnly) {
-            contextualProductLookup = { name: 'get_product_details', input: { externalProductId: productId } };
-          } else {
-            const detail = await this.executeTool('get_product_details', { externalProductId: productId }, context, undefined, options.signal);
-            if (!detail.ok) return respond(false, detail.error.message, 'verified-catalogue');
-            collectEvidence('get_product_details', detail.data);
-            const product = products[0];
-            if (!product) return respond(false, 'That product is no longer available in the connected catalogue.', 'verified-catalogue');
-            const amount = product.salePrice ?? product.price;
-            return respond(true, amount === null
-              ? `${product.name}: the connected catalogue does not supply a price.`
-              : `${product.name} is listed at ${amount} ${product.currency ?? ''}. The product card opens its recorded details.`, 'verified-catalogue');
-          }
+          if (!productId) return respond(true, responseLanguage === 'hi'
+            ? 'आप किस उत्पाद के बारे में पूछ रहे हैं? कृपया उत्पाद का नाम स्पष्ट रूप से बोलें या पहले उसे चुनें।'
+            : responseLanguage === 'te'
+              ? 'మీరు ఏ ఉత్పత్తి గురించి అడుగుతున్నారు? దయచేసి ఉత్పత్తి పేరును స్పష్టంగా చెప్పండి లేదా ముందుగా ఎంచుకోండి.'
+              : 'Which product do you mean? Search or select a product first.', 'verified-catalogue');
+          contextualProductLookup = { name: 'get_product_details', input: { externalProductId: productId } };
         }
         if (!referenceDetails) {
         const operation = /\bopen\b/i.test(question) && /\bcart\b/i.test(question) ? 'open_cart' :
@@ -645,12 +645,14 @@ export class AgentService {
     }
 
     const generateProductExplanation = contextualProductLookup?.name === 'get_product_details' &&
-      detailTopic && (conversational || this.config.values.llmProvider === 'openai-compatible' || this.config.values.ollamaFallbackEnabled);
-    const bilingualDetails = responseLanguage !== 'en' && contextualProductLookup?.name === 'get_product_details';
-    const websiteAnswer = conversational || generateProductExplanation || bilingualDetails ? undefined : await this.websiteKnowledge?.answer(
+      detailTopic && !context.publicVoiceOnly && (conversational || this.config.values.llmProvider === 'openai-compatible' || this.config.values.ollamaFallbackEnabled);
+    const factualProductDetails = contextualProductLookup?.name === 'get_product_details' &&
+      (responseLanguage !== 'en' || (detailTopic && !fullProductExplanation));
+    const websiteAnswer = conversational || generateProductExplanation || factualProductDetails ||
+      (priceOnly && contextualProductLookup?.name === 'get_product_details') ? undefined : await this.websiteKnowledge?.answer(
       question,
       context,
-      this.config.values.llmProvider === 'ollama' && this.config.values.ollamaFallbackEnabled,
+      !context.publicVoiceOnly && this.config.values.llmProvider === 'ollama' && this.config.values.ollamaFallbackEnabled,
     );
     if (websiteAnswer) {
       executedTools.push(...websiteAnswer.toolCalls);
@@ -676,6 +678,7 @@ export class AgentService {
     // 1. Backend-controlled knowledge retrieval, executed through the secure
     // tool executor with the backend-established tenant context.
     if (this.isApplicationQuestion(question) &&
+        !context.publicVoiceOnly &&
         !generalWellness &&
         (context.channel !== 'widget' || this.isUrgentSymptomQuestion(question))) {
       totalToolCalls++;
@@ -907,7 +910,27 @@ export class AgentService {
           pinnedProduct = { externalProductId: product.externalProductId, name: product.name };
           this.logger.log({ event: 'product_identity_context', requestId: context.requestId,
             selectedProductId: pinnedProduct.externalProductId, selectedProductName: pinnedProduct.name });
-          if (responseLanguage !== 'en') {
+          if (priceOnly) {
+            const card = products.find(item => item.externalProductId === product.externalProductId);
+            const amount = card?.salePrice ?? card?.price;
+            const currency = card?.currency;
+            const unavailable = responseLanguage === 'hi' ? 'जुड़े हुए उत्पाद विवरण में कीमत उपलब्ध नहीं है।'
+              : responseLanguage === 'te' ? 'అనుసంధానించిన ఉత్పత్తి వివరాల్లో ధర అందుబాటులో లేదు.'
+                : 'The connected product record does not supply a price.';
+            const price = typeof amount === 'number' && currency
+              ? new Intl.NumberFormat(responseLanguage === 'hi' ? 'hi-IN' : responseLanguage === 'te' ? 'te-IN' : 'en-IN',
+                  { maximumFractionDigits: 2 }).format(amount) + (currency === 'INR'
+                    ? responseLanguage === 'hi' ? ' रुपये' : responseLanguage === 'te' ? ' రూపాయలు' : ' Indian rupees'
+                    : ` ${currency}`) : undefined;
+            executedTools.push({ name: initialLookup.name, resultCount: 1 });
+            toolTraces.push({ name: initialLookup.name, round: 0, sequence: toolTraces.length, arguments: initialLookup.input,
+              outcome: 'succeeded', errorCode: null, durationMs: Date.now() - startedAt, resultSummary: { resultCount: 1 } });
+            return respond(true, `${product.name}: ${price ? responseLanguage === 'hi'
+              ? `दर्ज कीमत ${price} है। यह लाइव कीमत की पुष्टि नहीं है।`
+              : responseLanguage === 'te' ? `నమోదైన ధర ${price}. ఇది ప్రస్తుత లైవ్ ధర నిర్ధారణ కాదు.`
+                : `The recorded price is ${price}. This is not a verified live price.` : unavailable}`, 'verified-catalogue');
+          }
+          if (factualProductDetails) {
             options.signal?.throwIfAborted();
             const localized = bilingualProductAnswer(question, responseLanguage, product, execution.data.pageContext);
             executedTools.push({ name: initialLookup.name, resultCount: 1 });
@@ -920,7 +943,8 @@ export class AgentService {
               productId: product.externalProductId, language: responseLanguage,
               missingSections: localized.missingSections, untranslatedSections: localized.untranslatedSections,
             });
-            return respond(true, localized.answer, 'verified-bilingual-catalogue');
+            return respond(true, localized.answer, responseLanguage === 'en'
+              ? 'verified-factual-catalogue' : 'verified-bilingual-catalogue');
           }
           messages.push({ role: 'system', content: `The only selected product is ${JSON.stringify(pinnedProduct.name)}. Keep its identity unchanged. Start the answer with its exact name. Do not replace it with any other product.` });
         }
@@ -1025,7 +1049,7 @@ export class AgentService {
       );
     }
 
-    if (!conversational && this.config.values.llmProvider === 'ollama' && !this.config.values.ollamaFallbackEnabled) {
+    if (context.publicVoiceOnly || (!conversational && this.config.values.llmProvider === 'ollama' && !this.config.values.ollamaFallbackEnabled)) {
       return respond(
         true,
         'I could not verify that information from the connected website or catalogue. Please rephrase your question or ask about a specific product or website topic.',
